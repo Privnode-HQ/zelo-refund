@@ -5,6 +5,7 @@ import {
   Card,
   CardBody,
   CardHeader,
+  Checkbox,
   Chip,
   Divider,
   Input,
@@ -62,6 +63,7 @@ export const UserRefundPage = () => {
   const [error, setError] = useState<string | null>(null);
 
   const [amountYuan, setAmountYuan] = useState<string>('');
+  const [clearBalance, setClearBalance] = useState<boolean>(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{
@@ -102,6 +104,7 @@ export const UserRefundPage = () => {
     try {
       const body: Record<string, unknown> = {};
       if (amountYuan.trim()) body.amount_yuan = amountYuan.trim();
+      body.clear_balance = clearBalance;
       const data = await apiFetch(`/api/users/${encodeURIComponent(userId)}/refund`, {
         method: 'POST',
         body: JSON.stringify(body)
@@ -166,7 +169,8 @@ export const UserRefundPage = () => {
                 总实付金额 P（Stripe 优先）：Stripe {quote.amounts.stripe_net_paid_yuan} + 易支付 {quote.amounts.yipay_net_paid_yuan} =
                 {quote.amounts.total_net_paid_yuan}
               </div>
-              <div className="muted">应退 = max(0, min(剩余额度 R, 总实付金额 P))</div>
+              <div className="muted">应退 = floor(P * R / T)，其中 T = 总额度（余额+已用，包含促销）</div>
+              <div className="muted">勾选“清空用户余额”时，退款成功后余额为 0</div>
               <div className="muted">易支付历史退款：{quote.amounts.yipay_refunded_yuan}</div>
               <Divider />
               <div>
@@ -179,6 +183,9 @@ export const UserRefundPage = () => {
                 onValueChange={setAmountYuan}
                 description="不填则按“应退金额”执行；系统会优先从 Stripe 订单退款"
               />
+              <Checkbox isSelected={clearBalance} onValueChange={setClearBalance}>
+                清空用户余额（退款后余额为 0）
+              </Checkbox>
               <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
                 <Button color="primary" onPress={load}>
                   重新计算

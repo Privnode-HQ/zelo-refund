@@ -116,12 +116,14 @@ docker compose up --build
     - Stripe：通过 `users.stripe_customer` 列出该 Customer 的 Charge，使用 `amount - amount_refunded` 作为实付
     - 易支付：使用 MySQL `top_ups.money` 汇总（并扣除后台记录的易支付退款）
   - 当前剩余额度 R = `users.quota`（换算成元）
-  - 应退（元）= `max(0, min(R, P))`（赠送额度不可退）
+  - 总额度 T（含已用）= `users.quota + users.used_quota`（换算成元）
+  - 应退（元）= `floor(P * R / T)`（按比例退款，向下取整到分）
 - 执行退款顺序：
   - 先从 Stripe 订单退款（自动拆分到多笔 Charge，可部分退款）
   - 如仍不足，再按易支付订单退款（自动拆分到多笔订单）
 - 退款成功后：
-  - 回滚用户余额：按退款金额扣减 `users.quota`（精确到分：`quota_delta = refund_cents * 5000`）
+  - 回滚用户余额：默认按退款金额扣减 `users.quota`（精确到分：`quota_delta = refund_cents * 5000`）
+  - 可选：当接口参数 `clear_balance=true` 时，会清零 `users.quota`，确保退款后余额为 0
   - 在 Supabase Postgres 记录 `refunds` 审计日志
   - 若某笔易支付订单被全额退完，会把该笔 `top_ups.status` 更新为 `refund`
 

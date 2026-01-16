@@ -154,10 +154,14 @@ const buildRefundQuote = async (userId: string) => {
   }
 
   const totalNetPaidCents = stripeNetPaidCents + yipayNetPaidCents;
+  const totalQuota = quota + usedQuota;
   const dueCents = (() => {
     if (totalNetPaidCents <= 0n) return 0n;
-    if (remainingCentsByQuota <= 0n) return 0n;
-    return remainingCentsByQuota > totalNetPaidCents ? totalNetPaidCents : remainingCentsByQuota;
+    if (quota <= 0n) return 0n;
+    if (totalQuota <= 0n) return 0n;
+    const raw = (totalNetPaidCents * quota) / totalQuota;
+    if (raw <= 0n) return 0n;
+    return raw > totalNetPaidCents ? totalNetPaidCents : raw;
   })();
 
   const stripePlanCents = dueCents > stripeNetPaidCents ? stripeNetPaidCents : dueCents;
@@ -306,6 +310,7 @@ usersRouter.post('/:userId/refund', async (req, res) => {
 
     const BodySchema = z.object({
       amount_yuan: z.string().optional(),
+      clear_balance: z.boolean().optional().default(false),
       dry_run: z.boolean().optional().default(false)
     });
     const parsed = BodySchema.safeParse(req.body);
@@ -336,6 +341,7 @@ usersRouter.post('/:userId/refund', async (req, res) => {
         ok: true,
         dry_run: true,
         refund_yuan: centsToYuanString(targetCents),
+        clear_balance: parsed.data.clear_balance,
         plan: {
           stripe_yuan: centsToYuanString(targetCents > quote.stripeNetPaidCents ? quote.stripeNetPaidCents : targetCents),
           yipay_yuan: centsToYuanString(
@@ -348,8 +354,18 @@ usersRouter.post('/:userId/refund', async (req, res) => {
     const sb = requireSupabase();
     const batchId = `userrefund_${userId}_${Date.now()}`;
 
+    const targetQuotaDelta = parsed.data.clear_balance ? quote.quota : centsToQuota(targetCents);
+
     let remainingCents = targetCents;
+    let remainingQuotaDelta = targetQuotaDelta;
     const operations: Array<{ id: string; provider: string; amount_yuan: string; warning?: string }> = [];
+
+    const allocateQuotaDelta = (amountCents: bigint) => {
+      if (amountCents <= 0n) return 0n;
+      if (amountCents >= remainingCents) return remainingQuotaDelta;
+      if (remainingCents <= 0n) return 0n;
+      return (remainingQuotaDelta * amountCents) / remainingCents;
+    };
 
     const reserveQuota = async (deltaQuota: bigint) => {
       const [result] = await mysqlPool.execute(
@@ -388,10 +404,12 @@ usersRouter.post('/:userId/refund', async (req, res) => {
         const refundable = charge.remaining_cents;
         if (refundable <= 0n) continue;
         const amountCents = remainingCents > refundable ? refundable : remainingCents;
-        const deltaQuota = centsToQuota(amountCents);
+        const deltaQuota = allocateQuotaDelta(amountCents);
         const outRefundNo = `sr_${batchId}_${charge.id}_${amountCents}`;
 
-        await reserveQuota(deltaQuota);
+        if (deltaQuota > 0n) {
+          await reserveQuota(deltaQuota);
+        }
         let logId: string | null = null;
         let providerSucceeded = false;
         try {
@@ -410,6 +428,7 @@ usersRouter.post('/:userId/refund', async (req, res) => {
             performed_by: performedBy,
             raw_request: {
               batchId,
+              clear_balance: parsed.data.clear_balance,
               charge_id: charge.id,
               amount_cents: amountCents.toString()
             }
@@ -442,9 +461,12 @@ usersRouter.post('/:userId/refund', async (req, res) => {
             ...(warning ? { warning } : {})
           });
           remainingCents -= amountCents;
+          remainingQuotaDelta -= deltaQuota;
         } catch (err) {
           if (!providerSucceeded) {
-            await releaseQuota(deltaQuota);
+            if (deltaQuota > 0n) {
+              await releaseQuota(deltaQuota);
+            }
           }
           const message = err instanceof Error ? err.message : 'unknown_error';
           if (logId && !providerSucceeded) {
@@ -481,10 +503,12 @@ usersRouter.post('/:userId/refund', async (req, res) => {
         if (refundable <= 0n) continue;
 
         const amountCents = remainingCents > refundable ? refundable : remainingCents;
-        const deltaQuota = centsToQuota(amountCents);
+        const deltaQuota = allocateQuotaDelta(amountCents);
         const outRefundNo = `yr_${batchId}_${tradeNo}_${amountCents}`;
 
-        await reserveQuota(deltaQuota);
+        if (deltaQuota > 0n) {
+          await reserveQuota(deltaQuota);
+        }
         let logId: string | null = null;
         let providerSucceeded = false;
         try {
@@ -502,6 +526,7 @@ usersRouter.post('/:userId/refund', async (req, res) => {
             performed_by: performedBy,
             raw_request: {
               batchId,
+              clear_balance: parsed.data.clear_balance,
               trade_no: tradeNo,
               amount_cents: amountCents.toString()
             }
@@ -536,6 +561,7 @@ usersRouter.post('/:userId/refund', async (req, res) => {
             ...(warning ? { warning } : {})
           });
           remainingCents -= amountCents;
+          remainingQuotaDelta -= deltaQuota;
           refundedByTopup.set(tradeNo, already + amountCents);
 
           const nowRefunded = refundedByTopup.get(tradeNo) ?? 0n;
@@ -544,7 +570,9 @@ usersRouter.post('/:userId/refund', async (req, res) => {
           }
         } catch (err) {
           if (!providerSucceeded) {
-            await releaseQuota(deltaQuota);
+            if (deltaQuota > 0n) {
+              await releaseQuota(deltaQuota);
+            }
           }
           const message = err instanceof Error ? err.message : 'unknown_error';
           if (logId && !providerSucceeded) {
