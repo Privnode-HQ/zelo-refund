@@ -45,7 +45,7 @@ values ('00000000-0000-0000-0000-000000000000');
 易支付（alipay/wxpay）退款必须配置：
 
 - `YIPAY_PID`
-- `YIPAY_PRIVATE_KEY`：支持直接填 PEM（多行），或填 PEM 的 base64
+- `YIPAY_PRIVATE_KEY`：支持 PEM / PEM(base64) / DER(base64, PKCS#8/PKCS#1)
 - `YIPAY_SIGN_ALGO`：默认 `RSA-SHA256`，如上游要求可改为 `RSA-SHA1`
 
 可选：

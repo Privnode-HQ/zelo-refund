@@ -1,4 +1,11 @@
 import { z } from 'zod';
+import {
+  createPrivateKey,
+  createPublicKey,
+  type KeyObject,
+  type PrivateKeyInput,
+  type PublicKeyInput
+} from 'node:crypto';
 
 const parseNumber = (value: string) => {
   const parsed = Number(value);
@@ -8,7 +15,72 @@ const parseNumber = (value: string) => {
   return parsed;
 };
 
-const optionalPem = z
+const normalizeEnvNewlines = (value: string) => value.replaceAll('\\n', '\n');
+
+const looksLikePem = (value: string) => value.includes('BEGIN') && value.includes('KEY');
+
+const exportKeyToPem = (keyObject: KeyObject) => {
+  try {
+    return keyObject.export({ format: 'pem', type: 'pkcs8' }).toString();
+  } catch {
+    // ignore
+  }
+  try {
+    return keyObject.export({ format: 'pem', type: 'pkcs1' }).toString();
+  } catch {
+    // ignore
+  }
+  try {
+    return keyObject.export({ format: 'pem', type: 'spki' }).toString();
+  } catch {
+    // ignore
+  }
+  return null;
+};
+
+const tryDecodeKeyPemFromBase64 = (base64: string) => {
+  const decoded = Buffer.from(base64, 'base64').toString('utf8').trim();
+  const normalized = normalizeEnvNewlines(decoded);
+  if (looksLikePem(normalized)) return normalized;
+  return null;
+};
+
+const tryDecodeKeyPemFromDerBase64 = (base64: string) => {
+  const der = Buffer.from(base64, 'base64');
+  if (!der.length) return null;
+
+  const privateAttempts: PrivateKeyInput[] = [
+    { key: der, format: 'der', type: 'pkcs8' },
+    { key: der, format: 'der', type: 'pkcs1' }
+  ];
+  for (const input of privateAttempts) {
+    try {
+      const obj = createPrivateKey(input);
+      const pem = exportKeyToPem(obj);
+      if (pem) return pem;
+    } catch {
+      // ignore
+    }
+  }
+
+  const publicAttempts: PublicKeyInput[] = [
+    { key: der, format: 'der', type: 'spki' },
+    { key: der, format: 'der', type: 'pkcs1' }
+  ];
+  for (const input of publicAttempts) {
+    try {
+      const obj = createPublicKey(input);
+      const pem = exportKeyToPem(obj);
+      if (pem) return pem;
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+};
+
+const optionalKeyPem = z
   .string()
   .optional()
   .transform((value) => {
@@ -17,18 +89,26 @@ const optionalPem = z
     const trimmed = value.trim();
     if (!trimmed) return undefined;
 
-    const looksLikePem = trimmed.includes('BEGIN') && trimmed.includes('KEY');
-    if (looksLikePem) return trimmed;
+    const normalized = normalizeEnvNewlines(trimmed);
+    if (looksLikePem(normalized)) return normalized;
 
+    // Base64 of PEM
     try {
-      const decoded = Buffer.from(trimmed, 'base64').toString('utf8').trim();
-      if (!decoded.includes('BEGIN')) {
-        throw new Error('base64 did not decode to PEM');
-      }
-      return decoded;
+      const pem = tryDecodeKeyPemFromBase64(trimmed);
+      if (pem) return pem;
     } catch {
-      return trimmed;
+      // ignore
     }
+
+    // Base64 of DER (PKCS#8 / PKCS#1 / SPKI)
+    try {
+      const pem = tryDecodeKeyPemFromDerBase64(trimmed);
+      if (pem) return pem;
+    } catch {
+      // ignore
+    }
+
+    return normalized;
   });
 
 const EnvSchema = z.object({
@@ -49,8 +129,8 @@ const EnvSchema = z.object({
 
   YIPAY_BASE_URL: z.string().optional().default('https://pay.lxsd.cn'),
   YIPAY_PID: z.string().optional().default(''),
-  YIPAY_PRIVATE_KEY: optionalPem,
-  YIPAY_PUBLIC_KEY: optionalPem,
+  YIPAY_PRIVATE_KEY: optionalKeyPem,
+  YIPAY_PUBLIC_KEY: optionalKeyPem,
   YIPAY_SIGN_ALGO: z
     .enum(['RSA-SHA256', 'RSA-SHA1'])
     .optional()
