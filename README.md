@@ -141,7 +141,7 @@ docker compose up --build
 
 当前实现会：
 
-- 过滤掉 `sign`，并忽略空值参数
+- 过滤掉 `sign` / `sign_type`，并忽略空值参数
 - 按参数名升序排序后拼接为 `k1=v1&k2=v2...`
 - 使用 `YIPAY_PRIVATE_KEY` 做 RSA 签名（base64 输出）
 

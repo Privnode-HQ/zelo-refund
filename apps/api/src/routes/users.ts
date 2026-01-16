@@ -201,44 +201,49 @@ const buildRefundQuote = async (userId: string) => {
 export const usersRouter = Router();
 
 usersRouter.get('/', async (req, res) => {
-  const QuerySchema = z.object({
-    q: z.string().optional(),
-    limit: z
-      .string()
-      .optional()
-      .default('20')
-      .transform((v) => Math.min(Math.max(Number(v) || 20, 1), 100))
-  });
-  const parsed = QuerySchema.safeParse(req.query);
-  if (!parsed.success) {
-    return res.status(400).json({ error: 'invalid_query', details: parsed.error.flatten() });
-  }
-
-  const { q, limit } = parsed.data;
-  const where: string[] = [];
-  const params: Array<string | number> = [];
-
-  if (q) {
-    if (/^\d+$/.test(q)) {
-      where.push('(cast(id as char) = ? or email like ?)');
-      params.push(q, `%${q}%`);
-    } else {
-      where.push('email like ?');
-      params.push(`%${q}%`);
+  try {
+    const QuerySchema = z.object({
+      q: z.string().optional(),
+      limit: z
+        .string()
+        .optional()
+        .default('20')
+        .transform((v) => Math.min(Math.max(Number(v) || 20, 1), 100))
+    });
+    const parsed = QuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'invalid_query', details: parsed.error.flatten() });
     }
+
+    const { q, limit } = parsed.data;
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+
+    if (q) {
+      if (/^\d+$/.test(q)) {
+        where.push('(cast(id as char) = ? or email like ?)');
+        params.push(q, `%${q}%`);
+      } else {
+        where.push('email like ?');
+        params.push(`%${q}%`);
+      }
+    }
+
+    const sql = `
+      select id, email, quota, used_quota, stripe_customer
+      from users
+      ${where.length ? `where ${where.join(' and ')}` : ''}
+      order by id desc
+      limit ?
+    `;
+    params.push(limit);
+
+    const [rows] = await mysqlPool.query(sql, params);
+    return res.json({ items: rows });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'unknown_error';
+    return res.status(500).json({ error: 'users_failed', message });
   }
-
-  const sql = `
-    select id, email, quota, used_quota, stripe_customer
-    from users
-    ${where.length ? `where ${where.join(' and ')}` : ''}
-    order by id desc
-    limit ?
-  `;
-  params.push(limit);
-
-  const [rows] = await mysqlPool.query(sql, params);
-  return res.json({ items: rows });
 });
 
 usersRouter.get('/:userId/refund-quote', async (req, res) => {
