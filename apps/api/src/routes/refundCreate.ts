@@ -6,6 +6,7 @@ import { formatMoneyYuan } from '../utils/money.js';
 import { stripeClient, stripeRefund } from '../providers/stripe.js';
 import { yipayRefund } from '../providers/yipay.js';
 import { asBigInt, centsToYuanString, yuanStringToCents } from '../utils/quota.js';
+import { isUuid } from '../utils/uuid.js';
 
 type RefundCreateRouterOptions = {
   router: Router;
@@ -29,6 +30,8 @@ export const registerRefundCreateRoute = ({ router }: RefundCreateRouterOptions)
     if (!req.admin) {
       return res.status(500).json({ error: 'missing_admin_context' });
     }
+
+    const performedBy = isUuid(req.admin.userId) ? req.admin.userId : undefined;
 
     if (!supabaseAdmin) {
       return res.status(500).json({ error: 'server_missing_supabase' });
@@ -102,7 +105,7 @@ export const registerRefundCreateRoute = ({ router }: RefundCreateRouterOptions)
           out_refund_no: outRefundNo,
           quota_delta: amountQuota.toString(),
           status: 'pending',
-          performed_by: req.admin.userId,
+          performed_by: performedBy,
           raw_request: {
             tradeNo,
             yipayOrderNoField,

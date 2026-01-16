@@ -11,6 +11,7 @@ import {
   quotaToCentsFloor,
   yuanStringToCents
 } from '../utils/quota.js';
+import { isUuid } from '../utils/uuid.js';
 
 type MysqlUserRow = {
   id: string;
@@ -295,6 +296,8 @@ usersRouter.post('/:userId/refund', async (req, res) => {
       return res.status(500).json({ error: 'missing_admin_context' });
     }
 
+    const performedBy = isUuid(req.admin.userId) ? req.admin.userId : undefined;
+
     const userId = req.params.userId;
     if (!/^\d+$/.test(userId)) {
       return res.status(400).json({ error: 'invalid_user_id' });
@@ -403,7 +406,7 @@ usersRouter.post('/:userId/refund', async (req, res) => {
             provider: 'stripe',
             out_refund_no: outRefundNo,
             status: 'pending',
-            performed_by: req.admin.userId,
+            performed_by: performedBy,
             raw_request: {
               batchId,
               charge_id: charge.id,
@@ -495,7 +498,7 @@ usersRouter.post('/:userId/refund', async (req, res) => {
             provider: 'yipay',
             out_refund_no: outRefundNo,
             status: 'pending',
-            performed_by: req.admin.userId,
+            performed_by: performedBy,
             raw_request: {
               batchId,
               trade_no: tradeNo,

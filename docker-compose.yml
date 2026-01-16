@@ -20,7 +20,7 @@ services:
       args:
         VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
         VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
-        VITE_API_BASE_URL: http://refund-api:3001
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
     ports:
       - "25173:80"
     depends_on:

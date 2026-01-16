@@ -126,6 +126,7 @@ const EnvSchema = z.object({
   SUPABASE_JWT_SECRET: z.string().optional().default(''),
 
   ADMIN_EMAILS: z.string().optional().default(''),
+  ADMIN_API_KEY: z.string().optional().default(''),
 
   YIPAY_BASE_URL: z.string().optional().default('https://pay.lxsd.cn'),
   YIPAY_PID: z.string().optional().default(''),

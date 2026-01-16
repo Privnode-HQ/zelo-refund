@@ -31,6 +31,8 @@ values ('00000000-0000-0000-0000-000000000000');
 
 注意：后端会验证 Supabase JWT（需要 `SUPABASE_JWT_SECRET`），再通过 `public.admins` 表判断是否为管理员。
 
+如果你不想接入 Supabase Auth，可以使用 `ADMIN_API_KEY`（见下方环境变量说明）。
+
 ### 2) 配置环境变量
 
 - 前端：复制 `apps/admin/.env.example` -> `apps/admin/.env`
@@ -41,6 +43,10 @@ values ('00000000-0000-0000-0000-000000000000');
 - `MYSQL_*`: 连接到业务 MySQL（数据来源）
 - `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`: 用于写入审计日志（`public.refunds`）和检查管理员表
 - `SUPABASE_JWT_SECRET`: 用于校验管理员登录后的 `access_token`
+
+可选（不使用 Supabase Auth 时使用）：
+
+- `ADMIN_API_KEY`: 管理员 API Key（前端登录页填写，后端按 Bearer Token 校验）
 
 易支付（alipay/wxpay）退款必须配置：
 
@@ -85,7 +91,7 @@ npm run dev:admin
 ```bash
 VITE_SUPABASE_URL=
 VITE_SUPABASE_ANON_KEY=
-VITE_API_BASE_URL=http://localhost:3001
+VITE_API_BASE_URL=
 ```
 
 3) 启动：
@@ -94,10 +100,10 @@ VITE_API_BASE_URL=http://localhost:3001
 docker compose up --build
 ```
 
-- 管理后台：`http://localhost:5173`
-- API：`http://localhost:3001`
+- 管理后台：`http://localhost:25173`
+- API：`http://localhost:23001`
 
-注意：`VITE_*` 是前端编译期变量，修改后需要重新 `docker compose build admin`。
+注意：`VITE_*` 是前端编译期变量，修改后需要重新 `docker compose build refund-admin`。
 
 ## 关键业务规则
 

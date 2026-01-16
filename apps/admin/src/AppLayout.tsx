@@ -4,7 +4,7 @@ import { Button } from '@heroui/react';
 import { useAuth } from './providers/AuthProvider';
 
 export const AppLayout = () => {
-  const { session, signOut } = useAuth();
+  const { mode, session, signOut } = useAuth();
   const location = useLocation();
 
   return (
@@ -26,7 +26,7 @@ export const AppLayout = () => {
         </div>
 
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-          <div className="muted">{session?.user?.email}</div>
+          <div className="muted">{mode === 'supabase' ? session?.user?.email : 'API Key'}</div>
           <Button variant="flat" onPress={signOut}>
             退出
           </Button>

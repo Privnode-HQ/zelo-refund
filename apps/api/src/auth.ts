@@ -44,6 +44,11 @@ export const requireAdmin: RequestHandler = async (req, res, next) => {
       return res.status(401).json({ error: 'missing_bearer_token' });
     }
 
+    if (config.ADMIN_API_KEY && token === config.ADMIN_API_KEY) {
+      req.admin = { userId: 'api_key' };
+      return next();
+    }
+
     if (!config.SUPABASE_JWT_SECRET) {
       return res.status(500).json({ error: 'server_missing_supabase_jwt_secret' });
     }
