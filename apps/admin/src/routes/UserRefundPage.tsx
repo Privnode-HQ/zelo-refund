@@ -178,7 +178,7 @@ export const UserRefundPage = () => {
                 label="可选：手动指定退款金额(元)"
                 value={amountYuan}
                 onValueChange={setAmountYuan}
-                description="不填则按"应退金额"执行；系统会优先从 Stripe 订单退款"
+                description="不填则按 应退金额 执行；系统会优先从 Stripe 订单退款"
               />
               <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
                 <Button color="primary" onPress={load}>
