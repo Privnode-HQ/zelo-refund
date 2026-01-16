@@ -9,7 +9,7 @@ export type StripeRefundRequest = {
 };
 
 export const stripeClient = config.STRIPE_SECRET_KEY
-  ? new Stripe(config.STRIPE_SECRET_KEY, { apiVersion: '2024-06-20' })
+  ? new Stripe(config.STRIPE_SECRET_KEY, { apiVersion: '2023-10-16' })
   : null;
 
 export const listCustomerCharges = async (customerId: string) => {

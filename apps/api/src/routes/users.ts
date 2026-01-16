@@ -100,7 +100,7 @@ const listRefundsForUserAccounting = async (userId: string) => {
 const buildRefundQuote = async (userId: string) => {
   const user = await getUserById(userId);
   if (!user) {
-    return { user: null as MysqlUserRow | null };
+    return { user: null };
   }
 
   const quota = asBigInt(user.quota, 'quota');
@@ -458,8 +458,8 @@ usersRouter.post('/:userId/refund', async (req, res) => {
     // 2) Yipay fallback
     if (remainingCents > 0n) {
       const topups = await listUserYipayTopups(userId);
-    const refundsForAccounting = await listRefundsForUserAccounting(userId);
-    const refundedByTopup = new Map<string, bigint>();
+      const refundsForAccounting = await listRefundsForUserAccounting(userId);
+      const refundedByTopup = new Map<string, bigint>();
       for (const r of refundsForAccounting) {
         if (r.provider !== 'yipay') continue;
         const tradeNo = r.topup_trade_no ? String(r.topup_trade_no) : '';
