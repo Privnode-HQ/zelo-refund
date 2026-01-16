@@ -5,7 +5,7 @@ import { supabaseAdmin } from '../supabase.js';
 import { formatMoneyYuan } from '../utils/money.js';
 import { stripeClient, stripeRefund } from '../providers/stripe.js';
 import { yipayRefund } from '../providers/yipay.js';
-import { asBigInt, centsToYuanString, yuanStringToCents } from '../utils/quota.js';
+import { asBigInt, centsToQuota, centsToYuanString, yuanStringToCents } from '../utils/quota.js';
 import { isUuid } from '../utils/uuid.js';
 
 type RefundCreateRouterOptions = {
@@ -83,17 +83,40 @@ export const registerRefundCreateRoute = ({ router }: RefundCreateRouterOptions)
 
       const amountQuota = asBigInt(topup.amount ?? 0, 'amount');
       const userQuota = asBigInt(topup.user_quota ?? 0, 'user_quota');
-      if (amountQuota > 0n && userQuota < amountQuota) {
+
+      let quotaDelta: bigint | null = null;
+      let yipayMoneyYuan: string | null = null;
+      let yipayMoneyCents: bigint | null = null;
+
+      const outRefundNo = `refund_${tradeNo}_${Date.now()}`;
+      const isYipay = topup.payment_method === 'alipay' || topup.payment_method === 'wxpay';
+
+      if (isYipay) {
+        if (refundMoney === undefined) {
+          throw new Error('refundMoney is required for alipay/wxpay');
+        }
+        const moneyYuan = typeof refundMoney === 'number' ? formatMoneyYuan(refundMoney) : refundMoney;
+        const moneyCents = yuanStringToCents(moneyYuan);
+        if (moneyCents <= 0n) {
+          await conn.rollback();
+          return res.status(400).json({ error: 'invalid_refund_amount' });
+        }
+
+        yipayMoneyYuan = moneyYuan;
+        yipayMoneyCents = moneyCents;
+        quotaDelta = centsToQuota(moneyCents);
+      } else if (amountQuota > 0n) {
+        quotaDelta = amountQuota;
+      }
+
+      if (quotaDelta && quotaDelta > 0n && userQuota < quotaDelta) {
         await conn.rollback();
         return res.status(400).json({
           error: 'insufficient_user_quota',
           user_quota: userQuota.toString(),
-          topup_amount: amountQuota.toString()
+          quota_delta: quotaDelta.toString()
         });
       }
-
-      const outRefundNo = `refund_${tradeNo}_${Date.now()}`;
-      const isYipay = topup.payment_method === 'alipay' || topup.payment_method === 'wxpay';
 
       const { data: refundRow, error: insertErr } = await supabaseAdmin
         .from('refunds')
@@ -103,7 +126,7 @@ export const registerRefundCreateRoute = ({ router }: RefundCreateRouterOptions)
           payment_method: topup.payment_method,
           provider: isYipay ? 'yipay' : 'stripe',
           out_refund_no: outRefundNo,
-          quota_delta: amountQuota.toString(),
+          ...(quotaDelta ? { quota_delta: quotaDelta.toString() } : {}),
           status: 'pending',
           performed_by: performedBy,
           raw_request: {
@@ -126,17 +149,15 @@ export const registerRefundCreateRoute = ({ router }: RefundCreateRouterOptions)
       let providerResult: any;
 
       if (isYipay) {
-        if (refundMoney === undefined) {
-          throw new Error('refundMoney is required for alipay/wxpay');
+        if (!yipayMoneyYuan || yipayMoneyCents === null || !quotaDelta) {
+          throw new Error('yipay_refund_context_missing');
         }
-        const moneyYuan = typeof refundMoney === 'number' ? formatMoneyYuan(refundMoney) : refundMoney;
-        const moneyCents = yuanStringToCents(moneyYuan);
 
         const ts = Math.floor(Date.now() / 1000);
         providerResult = await yipayRefund({
           orderNoField: yipayOrderNoField ?? 'out_trade_no',
           orderNo: tradeNo,
-          money: moneyYuan,
+          money: yipayMoneyYuan,
           outRefundNo,
           timestamp: ts
         });
@@ -144,9 +165,10 @@ export const registerRefundCreateRoute = ({ router }: RefundCreateRouterOptions)
         await supabaseAdmin
           .from('refunds')
           .update({
-            refund_money: moneyYuan,
-            refund_money_minor: moneyCents.toString(),
-            currency: 'cny'
+            refund_money: yipayMoneyYuan,
+            refund_money_minor: yipayMoneyCents.toString(),
+            currency: 'cny',
+            quota_delta: quotaDelta.toString()
           })
           .eq('id', refundRowId);
       } else if (topup.payment_method === 'stripe') {
@@ -183,6 +205,12 @@ export const registerRefundCreateRoute = ({ router }: RefundCreateRouterOptions)
           idempotencyKey: outRefundNo
         });
 
+        if (typeof providerResult?.amount !== 'number') {
+          throw new Error('stripe_refund_missing_amount');
+        }
+
+        quotaDelta = centsToQuota(BigInt(providerResult.amount));
+
         if (providerResult?.charge && typeof providerResult.charge === 'string') {
           await supabaseAdmin
             .from('refunds')
@@ -192,17 +220,16 @@ export const registerRefundCreateRoute = ({ router }: RefundCreateRouterOptions)
             .eq('id', refundRowId);
         }
 
-        if (typeof providerResult?.amount === 'number') {
-          const cents = BigInt(providerResult.amount);
-          await supabaseAdmin
-            .from('refunds')
-            .update({
-              refund_money: centsToYuanString(cents),
-              refund_money_minor: cents.toString(),
-              currency: String(providerResult.currency ?? 'cny')
-            })
-            .eq('id', refundRowId);
-        }
+        const cents = BigInt(providerResult.amount);
+        await supabaseAdmin
+          .from('refunds')
+          .update({
+            refund_money: centsToYuanString(cents),
+            refund_money_minor: cents.toString(),
+            currency: String(providerResult.currency ?? 'cny'),
+            quota_delta: quotaDelta.toString()
+          })
+          .eq('id', refundRowId);
       } else {
         throw new Error(`Unsupported payment_method: ${topup.payment_method}`);
       }
@@ -216,10 +243,10 @@ export const registerRefundCreateRoute = ({ router }: RefundCreateRouterOptions)
         throw new Error('topup_already_updated');
       }
 
-      if (amountQuota > 0n) {
+      if (quotaDelta && quotaDelta > 0n) {
         const [updateUser] = await conn.execute(
           `update users set quota = quota - ? where id = ? and quota >= ?`,
-          [amountQuota.toString(), topup.user_id, amountQuota.toString()]
+          [quotaDelta.toString(), topup.user_id, quotaDelta.toString()]
         );
         const userAffected = (updateUser as any).affectedRows ?? 0;
         if (userAffected !== 1) {
