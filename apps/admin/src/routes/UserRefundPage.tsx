@@ -5,7 +5,6 @@ import {
   Card,
   CardBody,
   CardHeader,
-  Checkbox,
   Chip,
   Divider,
   Input,
@@ -63,7 +62,6 @@ export const UserRefundPage = () => {
   const [error, setError] = useState<string | null>(null);
 
   const [amountYuan, setAmountYuan] = useState<string>('');
-  const [clearBalance, setClearBalance] = useState<boolean>(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{
@@ -96,7 +94,7 @@ export const UserRefundPage = () => {
     void load();
   }, [load]);
 
-  const submitRefund = async () => {
+  const submitRefund = async (clearBalance: boolean = false) => {
     if (!userId) return;
     setSubmitting(true);
     setError(null);
@@ -170,7 +168,6 @@ export const UserRefundPage = () => {
                 {quote.amounts.total_net_paid_yuan}
               </div>
               <div className="muted">应退 = floor(P * R / T)，其中 T = 总额度（余额+已用，包含促销）</div>
-              <div className="muted">勾选“清空用户余额”时，退款成功后余额为 0</div>
               <div className="muted">易支付历史退款：{quote.amounts.yipay_refunded_yuan}</div>
               <Divider />
               <div>
@@ -181,17 +178,17 @@ export const UserRefundPage = () => {
                 label="可选：手动指定退款金额(元)"
                 value={amountYuan}
                 onValueChange={setAmountYuan}
-                description="不填则按“应退金额”执行；系统会优先从 Stripe 订单退款"
+                description="不填则按"应退金额"执行；系统会优先从 Stripe 订单退款"
               />
-              <Checkbox isSelected={clearBalance} onValueChange={setClearBalance}>
-                清空用户余额（退款后余额为 0）
-              </Checkbox>
               <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
                 <Button color="primary" onPress={load}>
                   重新计算
                 </Button>
-                <Button color="danger" onPress={submitRefund} isDisabled={!canRefund} isLoading={submitting}>
+                <Button color="danger" onPress={() => submitRefund(false)} isDisabled={!canRefund} isLoading={submitting}>
                   执行退款
+                </Button>
+                <Button color="warning" onPress={() => submitRefund(true)} isDisabled={!canRefund} isLoading={submitting}>
+                  执行退款并清空余额
                 </Button>
               </div>
               {!canRefund ? <div className="muted">当前无可退金额</div> : null}
