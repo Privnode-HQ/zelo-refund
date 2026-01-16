@@ -178,13 +178,18 @@ export const UserRefundPage = () => {
                 label="可选：手动指定退款金额(元)"
                 value={amountYuan}
                 onValueChange={setAmountYuan}
-                description="不填则按 应退金额 执行；系统会优先从 Stripe 订单退款"
+                description="不填则按 应退金额 执行并清空余额；如需保留余额，请手动指定退款金额"
               />
               <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
                 <Button color="primary" onPress={load}>
                   重新计算
                 </Button>
-                <Button color="danger" onPress={() => submitRefund(false)} isDisabled={!canRefund} isLoading={submitting}>
+                <Button
+                  color="danger"
+                  onPress={() => submitRefund(amountYuan.trim() ? false : true)}
+                  isDisabled={!canRefund}
+                  isLoading={submitting}
+                >
                   执行退款
                 </Button>
                 <Button color="warning" onPress={() => submitRefund(true)} isDisabled={!canRefund} isLoading={submitting}>
