@@ -1,0 +1,13 @@
+node_modules
+dist
+apps/*/dist
+
+.env
+.env.*
+
+.git
+.idea
+.vscode
+
+README.md
+supabase

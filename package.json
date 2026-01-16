@@ -1,0 +1,13 @@
+{
+  "name": "zelo-refund",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:admin": "npm run -w @zelo/admin dev",
+    "dev:api": "npm run -w @zelo/api dev",
+    "build": "npm run -w @zelo/admin build && npm run -w @zelo/api build",
+    "typecheck": "npm run -w @zelo/admin typecheck && npm run -w @zelo/api typecheck"
+  }
+}
