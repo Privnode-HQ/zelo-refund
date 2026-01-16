@@ -163,9 +163,10 @@ export const UserRefundPage = () => {
                 </Chip>
               </div>
               <div className="muted">
-                净入账（Stripe 优先）：Stripe {quote.amounts.stripe_net_paid_yuan} + 易支付 {quote.amounts.yipay_net_paid_yuan} =
+                总实付金额 P（Stripe 优先）：Stripe {quote.amounts.stripe_net_paid_yuan} + 易支付 {quote.amounts.yipay_net_paid_yuan} =
                 {quote.amounts.total_net_paid_yuan}
               </div>
+              <div className="muted">应退 = max(0, min(剩余额度 R, 总实付金额 P))</div>
               <div className="muted">易支付历史退款：{quote.amounts.yipay_refunded_yuan}</div>
               <Divider />
               <div>
@@ -223,4 +224,3 @@ export const UserRefundPage = () => {
     </div>
   );
 };
-

@@ -154,17 +154,14 @@ const buildRefundQuote = async (userId: string) => {
   }
 
   const totalNetPaidCents = stripeNetPaidCents + yipayNetPaidCents;
-  const refundableQuota = (() => {
-    const paidQuota = centsToQuota(totalNetPaidCents);
-    return paidQuota > usedQuota ? paidQuota - usedQuota : 0n;
+  const dueCents = (() => {
+    if (totalNetPaidCents <= 0n) return 0n;
+    if (remainingCentsByQuota <= 0n) return 0n;
+    return remainingCentsByQuota > totalNetPaidCents ? totalNetPaidCents : remainingCentsByQuota;
   })();
 
-  const dueQuota = refundableQuota > quota ? quota : refundableQuota;
-  const dueCents = quotaToCentsFloor(dueQuota);
-  const dueCentsCapped = dueCents > remainingCentsByQuota ? remainingCentsByQuota : dueCents;
-
-  const stripePlanCents = dueCentsCapped > stripeNetPaidCents ? stripeNetPaidCents : dueCentsCapped;
-  const yipayPlanCents = dueCentsCapped - stripePlanCents;
+  const stripePlanCents = dueCents > stripeNetPaidCents ? stripeNetPaidCents : dueCents;
+  const yipayPlanCents = dueCents - stripePlanCents;
 
   const yipayRefundedByTopup = new Map<string, bigint>();
   for (const r of refundsForAccounting) {
@@ -188,8 +185,7 @@ const buildRefundQuote = async (userId: string) => {
     stripeNetPaidCents,
     stripeRefundableCharges,
     totalNetPaidCents,
-    refundableQuota,
-    dueCents: dueCentsCapped,
+    dueCents,
     plan: {
       stripeCents: stripePlanCents,
       yipayCents: yipayPlanCents

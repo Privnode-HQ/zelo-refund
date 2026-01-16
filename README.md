@@ -112,10 +112,11 @@ docker compose up --build
   - 已用余额（元）= `users.used_quota / 500000`
   - 总余额（元，含赠送）= `(quota + used_quota) / 500000`
 - 整体退款会先计算“应退金额”（不要求逐笔选择订单）：
-  - 先算净入账（优先 Stripe）：
-    - Stripe：通过 `users.stripe_customer` 列出该 Customer 的 Charge，使用 `amount - amount_refunded` 作为净入账
+  - 先算总实付金额 P（优先 Stripe，均已扣除历史退款）：
+    - Stripe：通过 `users.stripe_customer` 列出该 Customer 的 Charge，使用 `amount - amount_refunded` 作为实付
     - 易支付：使用 MySQL `top_ups.money` 汇总（并扣除后台记录的易支付退款）
-  - 应退（元）= `max(0, 净入账 - 已用余额)`，并且不会超过当前 `users.quota`
+  - 当前剩余额度 R = `users.quota`（换算成元）
+  - 应退（元）= `max(0, min(R, P))`（赠送额度不可退）
 - 执行退款顺序：
   - 先从 Stripe 订单退款（自动拆分到多笔 Charge，可部分退款）
   - 如仍不足，再按易支付订单退款（自动拆分到多笔订单）
