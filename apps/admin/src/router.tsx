@@ -3,6 +3,7 @@ import { createBrowserRouter } from 'react-router-dom';
 import { AppLayout } from './AppLayout';
 import { LoginPage } from './routes/LoginPage';
 import { RefundsPage } from './routes/RefundsPage';
+import { RefundsViewPage } from './routes/RefundsViewPage';
 import { RequireAuth } from './routes/RequireAuth';
 import { TopupDetailPage } from './routes/TopupDetailPage';
 import { TopupsPage } from './routes/TopupsPage';
@@ -13,6 +14,10 @@ export const router = createBrowserRouter([
   {
     path: '/login',
     element: <LoginPage />
+  },
+  {
+    path: '/dashboard/index/Viewer/refundsView',
+    element: <RefundsViewPage />
   },
   {
     element: <RequireAuth />,
