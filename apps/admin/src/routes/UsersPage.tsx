@@ -76,6 +76,9 @@ export const UsersPage = () => {
               <Button color="primary" onPress={load} isLoading={loading}>
                 查询
               </Button>
+              <Link to="/users/batch-refund">
+                <Button variant="flat">批量退款</Button>
+              </Link>
             </div>
 
             {error ? <div style={{ color: '#b91c1c' }}>{error}</div> : null}

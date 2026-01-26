@@ -9,6 +9,7 @@ import { RequireAuth } from './routes/RequireAuth';
 import { TopupDetailPage } from './routes/TopupDetailPage';
 import { TopupsPage } from './routes/TopupsPage';
 import { UsersPage } from './routes/UsersPage';
+import { BatchRefundPage } from './routes/BatchRefundPage';
 import { UserRefundPage } from './routes/UserRefundPage';
 
 export const router = createBrowserRouter([
@@ -30,6 +31,7 @@ export const router = createBrowserRouter([
           { path: '/topups', element: <TopupsPage /> },
           { path: '/topups/:tradeNo', element: <TopupDetailPage /> },
           { path: '/users', element: <UsersPage /> },
+          { path: '/users/batch-refund', element: <BatchRefundPage /> },
           { path: '/users/:userId', element: <UserRefundPage /> },
           { path: '/refunds', element: <RefundsPage /> },
           { path: '/refund-estimate', element: <RefundEstimatePage /> }
