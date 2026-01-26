@@ -4,6 +4,7 @@ import { AppLayout } from './AppLayout';
 import { LoginPage } from './routes/LoginPage';
 import { RefundsPage } from './routes/RefundsPage';
 import { RefundsViewPage } from './routes/RefundsViewPage';
+import { RefundEstimatePage } from './routes/RefundEstimatePage';
 import { RequireAuth } from './routes/RequireAuth';
 import { TopupDetailPage } from './routes/TopupDetailPage';
 import { TopupsPage } from './routes/TopupsPage';
@@ -30,7 +31,8 @@ export const router = createBrowserRouter([
           { path: '/topups/:tradeNo', element: <TopupDetailPage /> },
           { path: '/users', element: <UsersPage /> },
           { path: '/users/:userId', element: <UserRefundPage /> },
-          { path: '/refunds', element: <RefundsPage /> }
+          { path: '/refunds', element: <RefundsPage /> },
+          { path: '/refund-estimate', element: <RefundEstimatePage /> }
         ]
       }
     ]

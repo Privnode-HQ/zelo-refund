@@ -22,6 +22,12 @@ export const AppLayout = () => {
             <Link to="/refunds" style={{ fontWeight: location.pathname.startsWith('/refunds') ? 600 : 400 }}>
               退款记录
             </Link>
+            <Link
+              to="/refund-estimate"
+              style={{ fontWeight: location.pathname.startsWith('/refund-estimate') ? 600 : 400 }}
+            >
+              退款测算
+            </Link>
           </nav>
         </div>
 

@@ -9,6 +9,7 @@ import { refundsRouter } from './routes/refunds.js';
 import { publicRefundsRouter } from './routes/publicRefunds.js';
 import { registerRefundCreateRoute } from './routes/refundCreate.js';
 import { usersRouter } from './routes/users.js';
+import { refundEstimateRouter } from './routes/refundEstimate.js';
 
 const app = express();
 
@@ -30,6 +31,7 @@ app.use('/api', requireAdmin);
 app.use('/api/topups', topupsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/refunds', refundsRouter);
+app.use('/api/refund-estimate', refundEstimateRouter);
 
 const refundRouter = express.Router();
 registerRefundCreateRoute({ router: refundRouter });
