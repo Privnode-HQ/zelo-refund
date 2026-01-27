@@ -7,6 +7,7 @@ import {
   Checkbox,
   Chip,
   Divider,
+  Input,
   Radio,
   RadioGroup,
   Table,
@@ -18,6 +19,7 @@ import {
   Textarea
 } from '@heroui/react';
 import { apiFetch } from '../lib/api';
+import { DEFAULT_FEE_PERCENT, applyFeeToCents, parsePercentToBps } from '../lib/fee';
 import { parseUserIds } from '../lib/userIds';
 
 type BatchRefundResult = {
@@ -89,6 +91,7 @@ export const BatchRefundPage = () => {
   const [clearBalance, setClearBalance] = useState<boolean>(true);
   const [dryRun, setDryRun] = useState<boolean>(false);
   const [scope, setScope] = useState<RefundScope>('all');
+  const [feePercent, setFeePercent] = useState<string>(DEFAULT_FEE_PERCENT);
 
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +100,17 @@ export const BatchRefundPage = () => {
   const abortRef = useRef<AbortController | null>(null);
 
   const parsed = useMemo(() => parseUserIds(rawUserIds), [rawUserIds]);
+
+  const feeBps = useMemo(() => {
+    const parsed = parsePercentToBps(feePercent);
+    if (parsed !== null) return parsed;
+    return parsePercentToBps(DEFAULT_FEE_PERCENT) ?? 500;
+  }, [feePercent]);
+
+  const feeInputValid = useMemo(() => {
+    if (!feePercent.trim()) return true;
+    return parsePercentToBps(feePercent) !== null;
+  }, [feePercent]);
 
   const summary = useMemo(() => {
     const total = results.length;
@@ -111,6 +125,11 @@ export const BatchRefundPage = () => {
     if (running) return;
     setError(null);
 
+    if (!feeInputValid) {
+      setError('手续费格式错误：请输入 0 ~ 100（最多两位小数）');
+      return;
+    }
+
     const { userIds } = parseUserIds(rawUserIds);
     if (!userIds.length) {
       setError('请输入用户ID（逗号或换行分割）');
@@ -118,7 +137,9 @@ export const BatchRefundPage = () => {
     }
 
     const confirmed = window.confirm(
-      `即将对 ${userIds.length} 个用户执行${dryRun ? '模拟退款' : '退款'}（范围：${scopeLabel(scope)}），是否继续？`
+      `即将对 ${userIds.length} 个用户执行${dryRun ? '模拟退款' : '退款'}（范围：${scopeLabel(scope)}；手续费：${
+        feePercent.trim() ? feePercent.trim() : DEFAULT_FEE_PERCENT
+      }%），是否继续？`
     );
     if (!confirmed) return;
 
@@ -145,15 +166,20 @@ export const BatchRefundPage = () => {
             const dueCents = toBigInt(quote?.refund?.due_cents);
             const stripePlanCents = toBigInt(quote?.refund?.plan?.stripe_cents);
             const yipayPlanCents = toBigInt(quote?.refund?.plan?.yipay_cents);
+            const stripeCapacityCents = yipayPlanCents > 0n ? stripePlanCents : dueCents;
+            const netDueCents = applyFeeToCents(dueCents, feeBps).netCents;
 
-            if (dueCents <= 0n) {
+            if (dueCents <= 0n || netDueCents <= 0n) {
               setResults((prev) =>
                 prev.map((r) => (r.userId === userId ? { ...r, status: 'skipped', error: '无可退金额' } : r))
               );
               continue;
             }
 
-            if (scope === 'stripe_only' && yipayPlanCents > 0n) {
+            const stripeNetPlanCents = netDueCents > stripeCapacityCents ? stripeCapacityCents : netDueCents;
+            const yipayNetPlanCents = netDueCents - stripeNetPlanCents;
+
+            if (scope === 'stripe_only' && yipayNetPlanCents > 0n) {
               setResults((prev) =>
                 prev.map((r) =>
                   r.userId === userId ? { ...r, status: 'skipped', error: '不符合条件：需要易支付退款' } : r
@@ -162,7 +188,7 @@ export const BatchRefundPage = () => {
               continue;
             }
 
-            if (scope === 'yipay_only' && stripePlanCents > 0n) {
+            if (scope === 'yipay_only' && stripeNetPlanCents > 0n) {
               setResults((prev) =>
                 prev.map((r) =>
                   r.userId === userId ? { ...r, status: 'skipped', error: '不符合条件：需要Stripe退款' } : r
@@ -184,7 +210,8 @@ export const BatchRefundPage = () => {
             method: 'POST',
             body: JSON.stringify({
               clear_balance: clearBalance,
-              dry_run: dryRun
+              dry_run: dryRun,
+              fee_percent: feePercent.trim() ? feePercent.trim() : undefined
             }),
             signal: controller.signal
           });
@@ -220,7 +247,7 @@ export const BatchRefundPage = () => {
       abortRef.current = null;
       setRunning(false);
     }
-  }, [clearBalance, dryRun, rawUserIds, running, scope]);
+  }, [clearBalance, dryRun, feeBps, feeInputValid, feePercent, rawUserIds, running, scope]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -258,6 +285,16 @@ export const BatchRefundPage = () => {
                 仅模拟（dry_run，不会真实退款）
               </Checkbox>
             </div>
+
+            <Input
+              label="手续费(%)"
+              value={feePercent}
+              onValueChange={setFeePercent}
+              isInvalid={!feeInputValid}
+              errorMessage={!feeInputValid ? '请输入 0 ~ 100（最多两位小数）' : undefined}
+              description={`默认 ${DEFAULT_FEE_PERCENT}%；留空则使用默认`}
+              style={{ maxWidth: 320 }}
+            />
 
             <RadioGroup
               label="退款范围"

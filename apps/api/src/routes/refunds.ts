@@ -53,7 +53,10 @@ refundsRouter.get('/', async (req, res) => {
 
   let query = supabaseAdmin
     .from('refunds')
-    .select('*', { count: 'exact' })
+    .select(
+      'id, created_at, mysql_user_id, topup_trade_no, stripe_charge_id, payment_method, refund_money, provider, status, error_message',
+      { count: 'exact' }
+    )
     .order('created_at', { ascending: false });
 
   if (mysql_user_id != null) {
@@ -81,4 +84,31 @@ refundsRouter.get('/', async (req, res) => {
     return res.status(500).json({ error: 'supabase_error', details: error.message });
   }
   return res.json({ items: data ?? [], limit, offset, total: count ?? null });
+});
+
+refundsRouter.get('/:id', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'server_missing_supabase' });
+  }
+
+  const ParamsSchema = z.object({
+    id: z.string().uuid()
+  });
+  const parsed = ParamsSchema.safeParse(req.params);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_refund_id', details: parsed.error.flatten() });
+  }
+
+  const { id } = parsed.data;
+  const { data, error } = await supabaseAdmin.from('refunds').select('*').eq('id', id).single();
+
+  if (error) {
+    const code = (error as any).code;
+    if (code === 'PGRST116') {
+      return res.status(404).json({ error: 'refund_not_found' });
+    }
+    return res.status(500).json({ error: 'supabase_error', details: error.message });
+  }
+
+  return res.json(data);
 });

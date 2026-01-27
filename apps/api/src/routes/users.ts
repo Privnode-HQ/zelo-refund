@@ -11,6 +11,7 @@ import {
   quotaToCentsFloor,
   yuanStringToCents
 } from '../utils/quota.js';
+import { DEFAULT_FEE_BPS, applyFeeToCents, parseFeePercentToBps } from '../utils/fee.js';
 import { isUuid } from '../utils/uuid.js';
 
 type MysqlUserRow = {
@@ -310,6 +311,7 @@ usersRouter.post('/:userId/refund', async (req, res) => {
 
     const BodySchema = z.object({
       amount_yuan: z.string().optional(),
+      fee_percent: z.union([z.string(), z.number()]).optional(),
       clear_balance: z.boolean().optional().default(false),
       dry_run: z.boolean().optional().default(false)
     });
@@ -323,29 +325,53 @@ usersRouter.post('/:userId/refund', async (req, res) => {
       return res.status(404).json({ error: 'user_not_found' });
     }
 
-    let targetCents = quote.dueCents;
-    if (parsed.data.amount_yuan) {
-      const requested = yuanStringToCents(parsed.data.amount_yuan);
-      if (requested <= 0n) {
-        return res.status(400).json({ error: 'invalid_amount' });
+    const feeBps = (() => {
+      try {
+        return parseFeePercentToBps(parsed.data.fee_percent, DEFAULT_FEE_BPS);
+      } catch {
+        return null;
       }
-      targetCents = requested > quote.dueCents ? quote.dueCents : requested;
+    })();
+    if (feeBps === null) {
+      return res.status(400).json({ error: 'invalid_fee_percent' });
     }
 
-    if (targetCents <= 0n) {
+    let requestedCents: bigint | null = null;
+    let grossCents = quote.dueCents;
+    if (parsed.data.amount_yuan) {
+      try {
+        requestedCents = yuanStringToCents(parsed.data.amount_yuan);
+      } catch {
+        return res.status(400).json({ error: 'invalid_amount' });
+      }
+      if (requestedCents <= 0n) {
+        return res.status(400).json({ error: 'invalid_amount' });
+      }
+      grossCents = requestedCents > quote.dueCents ? quote.dueCents : requestedCents;
+    }
+
+    if (grossCents <= 0n) {
       return res.status(409).json({ error: 'nothing_to_refund' });
+    }
+
+    const { feeCents, netCents } = applyFeeToCents(grossCents, feeBps);
+    if (netCents <= 0n) {
+      return res.status(400).json({ error: 'fee_too_high' });
     }
 
     if (parsed.data.dry_run) {
       return res.json({
         ok: true,
         dry_run: true,
-        refund_yuan: centsToYuanString(targetCents),
+        refund_yuan: centsToYuanString(netCents),
+        refund_gross_yuan: centsToYuanString(grossCents),
+        refund_fee_yuan: centsToYuanString(feeCents),
+        fee_bps: feeBps,
         clear_balance: parsed.data.clear_balance,
         plan: {
-          stripe_yuan: centsToYuanString(targetCents > quote.stripeNetPaidCents ? quote.stripeNetPaidCents : targetCents),
+          stripe_yuan: centsToYuanString(netCents > quote.stripeNetPaidCents ? quote.stripeNetPaidCents : netCents),
           yipay_yuan: centsToYuanString(
-            targetCents > quote.stripeNetPaidCents ? targetCents - quote.stripeNetPaidCents : 0n
+            netCents > quote.stripeNetPaidCents ? netCents - quote.stripeNetPaidCents : 0n
           )
         }
       });
@@ -354,11 +380,122 @@ usersRouter.post('/:userId/refund', async (req, res) => {
     const sb = requireSupabase();
     const batchId = `userrefund_${userId}_${Date.now()}`;
 
-    const targetQuotaDelta = parsed.data.clear_balance ? quote.quota : centsToQuota(targetCents);
+    const targetQuotaDelta = parsed.data.clear_balance ? quote.quota : centsToQuota(grossCents);
 
-    let remainingCents = targetCents;
+    let remainingCents = netCents;
     let remainingQuotaDelta = targetQuotaDelta;
     const operations: Array<{ id: string; provider: string; amount_yuan: string; warning?: string }> = [];
+
+    const calcTraceSteps: Array<{ i: number; name: string; detail: Record<string, unknown> }> = [];
+    const addCalcStep = (name: string, detail: Record<string, unknown>) => {
+      calcTraceSteps.push({ i: calcTraceSteps.length + 1, name, detail });
+    };
+
+    const computedAt = new Date().toISOString();
+    const totalQuota = quote.quota + quote.usedQuota;
+    const dueRawCents =
+      quote.totalNetPaidCents > 0n && quote.quota > 0n && totalQuota > 0n
+        ? (quote.totalNetPaidCents * quote.quota) / totalQuota
+        : 0n;
+    const dueClampedCents = (() => {
+      if (dueRawCents <= 0n) return 0n;
+      return dueRawCents > quote.totalNetPaidCents ? quote.totalNetPaidCents : dueRawCents;
+    })();
+
+    addCalcStep('input', {
+      mysql_user_id: userId,
+      amount_yuan: parsed.data.amount_yuan ?? null,
+      fee_percent: parsed.data.fee_percent ?? null,
+      clear_balance: parsed.data.clear_balance,
+      dry_run: parsed.data.dry_run
+    });
+    addCalcStep('quote.user', {
+      user_id: quote.user.id,
+      email: quote.user.email ?? null,
+      stripe_customer: quote.stripeCustomer || null
+    });
+    addCalcStep('quote.quota', {
+      quota: quote.quota.toString(),
+      used_quota: quote.usedQuota.toString(),
+      total_quota: totalQuota.toString(),
+      remaining_cents_by_quota: quote.remainingCentsByQuota.toString(),
+      remaining_yuan_by_quota: centsToYuanString(quote.remainingCentsByQuota)
+    });
+    addCalcStep('quote.yipay', {
+      paid_cents: quote.yipayPaidCents.toString(),
+      refunded_cents: quote.yipayRefundedCents.toString(),
+      net_paid_cents: quote.yipayNetPaidCents.toString(),
+      refunded_by_topup: Array.from(quote.yipayRefundedByTopup.entries()).map(([tradeNo, cents]) => ({
+        topup_trade_no: tradeNo,
+        refunded_cents: cents.toString()
+      }))
+    });
+    addCalcStep('quote.stripe', {
+      stripe_customer: quote.stripeCustomer || null,
+      currency: quote.stripeCurrency,
+      net_paid_cents: quote.stripeNetPaidCents.toString(),
+      refundable_charges: quote.stripeRefundableCharges.map((c) => ({
+        id: c.id,
+        created: c.created,
+        payment_intent: c.payment_intent,
+        currency: c.currency,
+        remaining_cents: c.remaining_cents.toString()
+      }))
+    });
+    addCalcStep('quote.due', {
+      formula: 'floor(P * R / T)',
+      P_total_net_paid_cents: quote.totalNetPaidCents.toString(),
+      R_quota: quote.quota.toString(),
+      T_total_quota: totalQuota.toString(),
+      due_raw_cents: dueRawCents.toString(),
+      due_clamped_cents: dueClampedCents.toString(),
+      due_final_cents: quote.dueCents.toString(),
+      due_final_yuan: centsToYuanString(quote.dueCents),
+      due_plan: {
+        stripe_cents: quote.plan.stripeCents.toString(),
+        yipay_cents: quote.plan.yipayCents.toString()
+      }
+    });
+    addCalcStep('amount.override', {
+      requested_yuan: parsed.data.amount_yuan ?? null,
+      requested_cents: requestedCents?.toString() ?? null,
+      gross_cents: grossCents.toString(),
+      gross_yuan: centsToYuanString(grossCents)
+    });
+    addCalcStep('fee', {
+      fee_percent: parsed.data.fee_percent ?? null,
+      fee_bps: feeBps,
+      fee_cents: feeCents.toString(),
+      fee_yuan: centsToYuanString(feeCents),
+      net_cents: netCents.toString(),
+      net_yuan: centsToYuanString(netCents)
+    });
+    addCalcStep('quota_delta', {
+      clear_balance: parsed.data.clear_balance,
+      rule: parsed.data.clear_balance ? 'clear_balance => quota' : 'gross_cents * QUOTA_PER_CENT',
+      target_quota_delta: targetQuotaDelta.toString(),
+      quota_per_cent: '5000'
+    });
+    addCalcStep('execution.init', {
+      remaining_cents: remainingCents.toString(),
+      remaining_quota_delta: remainingQuotaDelta.toString()
+    });
+
+    const calcTraceBase = {
+      version: 1,
+      computed_at: computedAt,
+      batch_id: batchId,
+      mysql_user_id: userId,
+      steps: calcTraceSteps,
+      summary: {
+        due_cents: quote.dueCents.toString(),
+        gross_cents: grossCents.toString(),
+        fee_bps: feeBps,
+        fee_cents: feeCents.toString(),
+        net_cents: netCents.toString(),
+        target_quota_delta: targetQuotaDelta.toString()
+      }
+    };
 
     const allocateQuotaDelta = (amountCents: bigint) => {
       if (amountCents <= 0n) return 0n;
@@ -407,6 +544,19 @@ usersRouter.post('/:userId/refund', async (req, res) => {
         const deltaQuota = allocateQuotaDelta(amountCents);
         const outRefundNo = `sr_${batchId}_${charge.id}_${amountCents}`;
 
+        const opTrace = {
+          provider: 'stripe',
+          stripe_charge_id: charge.id,
+          stripe_payment_intent_id: charge.payment_intent ?? null,
+          amount_cents: amountCents.toString(),
+          amount_yuan: centsToYuanString(amountCents),
+          remaining_cents_before: remainingCents.toString(),
+          remaining_quota_delta_before: remainingQuotaDelta.toString(),
+          quota_delta: deltaQuota.toString(),
+          remaining_cents_after_expected: (remainingCents - amountCents).toString(),
+          remaining_quota_delta_after_expected: (remainingQuotaDelta - deltaQuota).toString()
+        };
+
         if (deltaQuota > 0n) {
           await reserveQuota(deltaQuota);
         }
@@ -429,6 +579,15 @@ usersRouter.post('/:userId/refund', async (req, res) => {
             raw_request: {
               batchId,
               clear_balance: parsed.data.clear_balance,
+              fee_percent: parsed.data.fee_percent,
+              fee_bps: feeBps,
+              refund_gross_cents_total: grossCents.toString(),
+              refund_fee_cents_total: feeCents.toString(),
+              refund_net_cents_total: netCents.toString(),
+              calc_trace: {
+                ...calcTraceBase,
+                operation: opTrace
+              },
               charge_id: charge.id,
               amount_cents: amountCents.toString()
             }
@@ -506,6 +665,21 @@ usersRouter.post('/:userId/refund', async (req, res) => {
         const deltaQuota = allocateQuotaDelta(amountCents);
         const outRefundNo = `yr_${batchId}_${tradeNo}_${amountCents}`;
 
+        const opTrace = {
+          provider: 'yipay',
+          topup_trade_no: tradeNo,
+          topup_cents: topupCents.toString(),
+          already_refunded_cents: already.toString(),
+          refundable_cents: refundable.toString(),
+          amount_cents: amountCents.toString(),
+          amount_yuan: centsToYuanString(amountCents),
+          remaining_cents_before: remainingCents.toString(),
+          remaining_quota_delta_before: remainingQuotaDelta.toString(),
+          quota_delta: deltaQuota.toString(),
+          remaining_cents_after_expected: (remainingCents - amountCents).toString(),
+          remaining_quota_delta_after_expected: (remainingQuotaDelta - deltaQuota).toString()
+        };
+
         if (deltaQuota > 0n) {
           await reserveQuota(deltaQuota);
         }
@@ -527,6 +701,15 @@ usersRouter.post('/:userId/refund', async (req, res) => {
             raw_request: {
               batchId,
               clear_balance: parsed.data.clear_balance,
+              fee_percent: parsed.data.fee_percent,
+              fee_bps: feeBps,
+              refund_gross_cents_total: grossCents.toString(),
+              refund_fee_cents_total: feeCents.toString(),
+              refund_net_cents_total: netCents.toString(),
+              calc_trace: {
+                ...calcTraceBase,
+                operation: opTrace
+              },
               trade_no: tradeNo,
               amount_cents: amountCents.toString()
             }
@@ -590,7 +773,7 @@ usersRouter.post('/:userId/refund', async (req, res) => {
     if (remainingCents > 0n) {
       return res.status(500).json({
         error: 'refund_incomplete',
-        refunded_yuan: centsToYuanString(targetCents - remainingCents),
+        refunded_yuan: centsToYuanString(netCents - remainingCents),
         remaining_yuan: centsToYuanString(remainingCents),
         operations
       });
@@ -598,7 +781,10 @@ usersRouter.post('/:userId/refund', async (req, res) => {
 
     return res.json({
       ok: true,
-      refunded_yuan: centsToYuanString(targetCents),
+      refunded_yuan: centsToYuanString(netCents),
+      refund_gross_yuan: centsToYuanString(grossCents),
+      refund_fee_yuan: centsToYuanString(feeCents),
+      fee_bps: feeBps,
       operations
     });
   } catch (err) {

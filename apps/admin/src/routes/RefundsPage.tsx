@@ -61,6 +61,11 @@ export const RefundsPage = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [selectedRefundId, setSelectedRefundId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<any | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+
   const [draft, setDraft] = useState<Filters>({
     mysqlUserId: '',
     status: '',
@@ -142,6 +147,40 @@ export const RefundsPage = () => {
     setApplied(next);
     setPage(1);
   };
+
+  const formatJson = (value: unknown) => {
+    if (value === undefined) return '';
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  };
+
+  const toggleDetail = useCallback(
+    async (id: string) => {
+      if (selectedRefundId === id) {
+        setSelectedRefundId(null);
+        setDetail(null);
+        setDetailError(null);
+        return;
+      }
+
+      setSelectedRefundId(id);
+      setDetail(null);
+      setDetailError(null);
+      setDetailLoading(true);
+      try {
+        const data = await apiFetch(`/api/refunds/${encodeURIComponent(id)}`);
+        setDetail(data);
+      } catch (e) {
+        setDetailError(e instanceof Error ? e.message : '加载详情失败');
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [selectedRefundId]
+  );
 
   return (
     <div className="container">
@@ -288,6 +327,7 @@ export const RefundsPage = () => {
               <TableColumn>退款金额(元)</TableColumn>
               <TableColumn>状态</TableColumn>
               <TableColumn>错误</TableColumn>
+              <TableColumn>详情</TableColumn>
             </TableHeader>
             <TableBody items={items} emptyContent={loading ? '加载中…' : '暂无记录'}>
               {(item) => (
@@ -309,10 +349,92 @@ export const RefundsPage = () => {
                     </Chip>
                   </TableCell>
                   <TableCell>{item.error_message ?? ''}</TableCell>
+                  <TableCell>
+                    <Button size="sm" variant="flat" onPress={() => void toggleDetail(item.id)}>
+                      {selectedRefundId === item.id ? '收起' : '展开'}
+                    </Button>
+                  </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
+
+          {selectedRefundId ? (
+            <div style={{ marginTop: 16 }}>
+              <Card>
+                <CardHeader style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                  <div>退款详情</div>
+                  <Button size="sm" variant="flat" onPress={() => setSelectedRefundId(null)}>
+                    关闭
+                  </Button>
+                </CardHeader>
+                <CardBody style={{ display: 'grid', gap: 12 }}>
+                  {detailLoading ? <div className="muted">加载中…</div> : null}
+                  {detailError ? <div style={{ color: '#b91c1c' }}>{detailError}</div> : null}
+                  {detail ? (
+                    <>
+                      <div className="muted" style={{ fontSize: 12 }}>
+                        id: {detail.id}
+                      </div>
+                      <details open>
+                        <summary style={{ cursor: 'pointer' }}>退款计算过程（calc_trace）</summary>
+                        <pre
+                          style={{
+                            marginTop: 8,
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            fontSize: 12,
+                            background: '#0b1020',
+                            color: '#e5e7eb',
+                            padding: 12,
+                            borderRadius: 8
+                          }}
+                        >
+                          {formatJson((detail as any)?.raw_request?.calc_trace ?? null)}
+                        </pre>
+                      </details>
+
+                      <details>
+                        <summary style={{ cursor: 'pointer' }}>raw_request</summary>
+                        <pre
+                          style={{
+                            marginTop: 8,
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            fontSize: 12,
+                            background: '#0b1020',
+                            color: '#e5e7eb',
+                            padding: 12,
+                            borderRadius: 8
+                          }}
+                        >
+                          {formatJson((detail as any)?.raw_request ?? null)}
+                        </pre>
+                      </details>
+
+                      <details>
+                        <summary style={{ cursor: 'pointer' }}>raw_response</summary>
+                        <pre
+                          style={{
+                            marginTop: 8,
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            fontSize: 12,
+                            background: '#0b1020',
+                            color: '#e5e7eb',
+                            padding: 12,
+                            borderRadius: 8
+                          }}
+                        >
+                          {formatJson((detail as any)?.raw_response ?? null)}
+                        </pre>
+                      </details>
+                    </>
+                  ) : null}
+                </CardBody>
+              </Card>
+            </div>
+          ) : null}
           </div>
         </CardBody>
       </Card>

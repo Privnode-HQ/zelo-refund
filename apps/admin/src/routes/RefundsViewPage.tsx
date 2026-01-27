@@ -32,6 +32,11 @@ type ActivityResponse = {
   total?: number | null;
 };
 
+type RefundActivityDetailResponse = {
+  item: RefundActivityRow & { error_message?: string | null };
+  calc_trace: unknown | null;
+};
+
 const REFRESH_MS = 3000;
 
 type StatusFilter = '' | RefundActivityRow['status'];
@@ -60,6 +65,11 @@ export const RefundsViewPage = () => {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const isRefreshingRef = useRef(false);
+
+  const [selectedRefundId, setSelectedRefundId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<RefundActivityDetailResponse | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
 
   const [draft, setDraft] = useState<Filters>({
     mysqlUserId: '',
@@ -136,6 +146,42 @@ export const RefundsViewPage = () => {
     if (!Number.isFinite(n)) return '-';
     return n.toFixed(2);
   };
+
+  const formatJson = (value: unknown) => {
+    if (value === undefined) return '';
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  };
+
+  const toggleDetail = useCallback(
+    async (id: string) => {
+      if (selectedRefundId === id) {
+        setSelectedRefundId(null);
+        setDetail(null);
+        setDetailError(null);
+        return;
+      }
+
+      setSelectedRefundId(id);
+      setDetail(null);
+      setDetailError(null);
+      setDetailLoading(true);
+      try {
+        const data = await publicApiFetch<RefundActivityDetailResponse>(
+          `/api/public/refunds/activity/${encodeURIComponent(id)}`
+        );
+        setDetail(data);
+      } catch (e) {
+        setDetailError(e instanceof Error ? e.message : '加载详情失败');
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [selectedRefundId]
+  );
 
   const lastPage = useMemo(() => {
     if (total == null) return null;
@@ -326,6 +372,7 @@ export const RefundsViewPage = () => {
               <TableColumn>支付方式</TableColumn>
               <TableColumn>退款金额(元)</TableColumn>
               <TableColumn>状态</TableColumn>
+              <TableColumn>详情</TableColumn>
             </TableHeader>
             <TableBody items={items} emptyContent="暂无记录">
               {(item) => (
@@ -345,10 +392,80 @@ export const RefundsViewPage = () => {
                       {item.status}
                     </Chip>
                   </TableCell>
+                  <TableCell>
+                    <Button size="sm" variant="flat" onPress={() => void toggleDetail(item.id)}>
+                      {selectedRefundId === item.id ? '收起' : '展开'}
+                    </Button>
+                  </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
+
+          {selectedRefundId ? (
+            <div style={{ marginTop: 16 }}>
+              <Card>
+                <CardHeader style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                  <div>退款详情（脱敏）</div>
+                  <Button size="sm" variant="flat" onPress={() => setSelectedRefundId(null)}>
+                    关闭
+                  </Button>
+                </CardHeader>
+                <CardBody style={{ display: 'grid', gap: 12 }}>
+                  {detailLoading ? <div className="muted">加载中…</div> : null}
+                  {detailError ? <div style={{ color: '#b91c1c' }}>{detailError}</div> : null}
+                  {detail ? (
+                    <>
+                      <div className="muted" style={{ fontSize: 12 }}>
+                        id: {detail.item.id}
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr', gap: 8 }}>
+                        <div className="muted">时间</div>
+                        <div>{new Date(detail.item.created_at).toLocaleString()}</div>
+
+                        <div className="muted">用户ID</div>
+                        <div>{detail.item.mysql_user_id ?? '-'}</div>
+
+                        <div className="muted">通道</div>
+                        <div>{detail.item.provider ?? '-'}</div>
+
+                        <div className="muted">支付方式</div>
+                        <div>{detail.item.payment_method}</div>
+
+                        <div className="muted">退款金额(元)</div>
+                        <div>{formatMoney(detail.item.refund_money)}</div>
+
+                        <div className="muted">状态</div>
+                        <div>{detail.item.status}</div>
+                      </div>
+
+                      {detail.item.error_message ? (
+                        <div style={{ color: '#b91c1c' }}>错误：{detail.item.error_message}</div>
+                      ) : null}
+
+                      <details open>
+                        <summary style={{ cursor: 'pointer' }}>退款计算过程（calc_trace）</summary>
+                        <pre
+                          style={{
+                            marginTop: 8,
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            fontSize: 12,
+                            background: '#0b1020',
+                            color: '#e5e7eb',
+                            padding: 12,
+                            borderRadius: 8
+                          }}
+                        >
+                          {formatJson(detail.calc_trace)}
+                        </pre>
+                      </details>
+                    </>
+                  ) : null}
+                </CardBody>
+              </Card>
+            </div>
+          ) : null}
           </div>
         </CardBody>
       </Card>
