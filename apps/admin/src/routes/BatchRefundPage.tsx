@@ -18,6 +18,7 @@ import {
   Textarea
 } from '@heroui/react';
 import { apiFetch } from '../lib/api';
+import { parseUserIds } from '../lib/userIds';
 
 type BatchRefundResult = {
   userId: string;
@@ -28,29 +29,6 @@ type BatchRefundResult = {
 };
 
 type RefundScope = 'all' | 'stripe_only' | 'yipay_only';
-
-const parseUserIds = (input: string) => {
-  const rawParts = input
-    .split(/[\n\r,，]+/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const userIds: string[] = [];
-  const invalid: string[] = [];
-  const seen = new Set<string>();
-
-  for (const part of rawParts) {
-    if (!/^\d+$/.test(part)) {
-      invalid.push(part);
-      continue;
-    }
-    if (seen.has(part)) continue;
-    seen.add(part);
-    userIds.push(part);
-  }
-
-  return { userIds, invalid };
-};
 
 const chipColor = (
   status: BatchRefundResult['status']
