@@ -1,5 +1,18 @@
-import React, { useEffect, useState } from 'react';
-import { Card, CardBody, CardHeader, Chip, Table, TableBody, TableCell, TableColumn, TableHeader, TableRow } from '@heroui/react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  Chip,
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableColumn,
+  TableHeader,
+  TableRow
+} from '@heroui/react';
 import { apiFetch } from '../lib/api';
 
 type RefundRow = {
@@ -15,22 +28,256 @@ type RefundRow = {
   error_message?: string | null;
 };
 
+type RefundsResponse = {
+  items: RefundRow[];
+  limit: number;
+  offset: number;
+  total?: number | null;
+};
+
+type StatusFilter = '' | RefundRow['status'];
+
+type Filters = {
+  mysqlUserId: string;
+  status: StatusFilter;
+  startAt: string;
+  endAt: string;
+  paymentMethod: string;
+  limit: number;
+};
+
+const toIso = (value: string) => {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+};
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
 export const RefundsPage = () => {
   const [items, setItems] = useState<RefundRow[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [draft, setDraft] = useState<Filters>({
+    mysqlUserId: '',
+    status: '',
+    startAt: '',
+    endAt: '',
+    paymentMethod: '',
+    limit: 50
+  });
+  const [applied, setApplied] = useState<Filters>(draft);
+  const [page, setPage] = useState(1);
+
+  const offset = (page - 1) * applied.limit;
+
+  const queryString = useMemo(() => {
+    const params = new URLSearchParams();
+
+    const userId = applied.mysqlUserId.trim();
+    if (userId) params.set('mysql_user_id', userId);
+
+    if (applied.status) params.set('status', applied.status);
+
+    const startIso = toIso(applied.startAt);
+    if (startIso) params.set('start_at', startIso);
+
+    const endIso = toIso(applied.endAt);
+    if (endIso) params.set('end_at', endIso);
+
+    const pm = applied.paymentMethod.trim();
+    if (pm) params.set('payment_method', pm);
+
+    params.set('limit', String(applied.limit));
+    params.set('offset', String(offset));
+    return params.toString();
+  }, [applied, offset]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await apiFetch<RefundsResponse>(`/api/refunds?${queryString}`);
+      setItems(Array.isArray(data.items) ? data.items : []);
+      setTotal(typeof data.total === 'number' ? data.total : null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '加载失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [queryString]);
+
   useEffect(() => {
-    apiFetch('/api/refunds')
-      .then((data) => setItems(data.items ?? []))
-      .catch((e) => setError(e instanceof Error ? e.message : '加载失败'));
-  }, []);
+    void load();
+  }, [load]);
+
+  const lastPage = useMemo(() => {
+    if (total == null) return null;
+    return Math.max(1, Math.ceil(total / applied.limit));
+  }, [applied.limit, total]);
+
+  const applyFilters = () => {
+    setPage(1);
+    setApplied({
+      ...draft,
+      mysqlUserId: draft.mysqlUserId.trim(),
+      paymentMethod: draft.paymentMethod.trim(),
+      limit: clamp(Number(draft.limit) || 50, 1, 200)
+    });
+  };
+
+  const resetFilters = () => {
+    const next: Filters = {
+      mysqlUserId: '',
+      status: '',
+      startAt: '',
+      endAt: '',
+      paymentMethod: '',
+      limit: 50
+    };
+    setDraft(next);
+    setApplied(next);
+    setPage(1);
+  };
 
   return (
     <div className="container">
       <Card>
         <CardHeader>退款记录</CardHeader>
         <CardBody>
-          {error ? <div style={{ color: '#b91c1c' }}>{error}</div> : null}
+          <div style={{ display: 'grid', gap: 12 }}>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+              <Input
+                label="用户ID"
+                value={draft.mysqlUserId}
+                onValueChange={(v) => setDraft((prev) => ({ ...prev, mysqlUserId: v }))}
+                style={{ minWidth: 200 }}
+              />
+              <Input
+                label="支付方式"
+                placeholder="stripe / alipay / wxpay"
+                value={draft.paymentMethod}
+                onValueChange={(v) => setDraft((prev) => ({ ...prev, paymentMethod: v }))}
+                style={{ minWidth: 220 }}
+              />
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  状态
+                </div>
+                {(['', 'pending', 'succeeded', 'failed'] as const).map((v) => (
+                  <Button
+                    key={v || 'all'}
+                    size="sm"
+                    variant={draft.status === v ? 'solid' : 'flat'}
+                    color={
+                      v === 'succeeded'
+                        ? 'success'
+                        : v === 'failed'
+                          ? 'danger'
+                          : v === 'pending'
+                            ? 'warning'
+                            : 'default'
+                    }
+                    onPress={() => setDraft((prev) => ({ ...prev, status: v }))}
+                  >
+                    {v || '全部'}
+                  </Button>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  快捷支付方式
+                </div>
+                {['', 'stripe', 'alipay', 'wxpay'].map((v) => (
+                  <Button
+                    key={v || 'all'}
+                    size="sm"
+                    variant={draft.paymentMethod.trim() === v ? 'solid' : 'flat'}
+                    onPress={() =>
+                      setDraft((prev) => ({
+                        ...prev,
+                        paymentMethod: v
+                      }))
+                    }
+                  >
+                    {v || '全部'}
+                  </Button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+              <Input
+                label="开始时间"
+                type="datetime-local"
+                value={draft.startAt}
+                onValueChange={(v) => setDraft((prev) => ({ ...prev, startAt: v }))}
+                style={{ minWidth: 240 }}
+              />
+              <Input
+                label="结束时间"
+                type="datetime-local"
+                value={draft.endAt}
+                onValueChange={(v) => setDraft((prev) => ({ ...prev, endAt: v }))}
+                style={{ minWidth: 240 }}
+              />
+              <Input
+                label="每页"
+                type="number"
+                value={String(draft.limit)}
+                onValueChange={(v) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    limit: clamp(Number(v) || 50, 1, 200)
+                  }))
+                }
+                style={{ width: 120 }}
+              />
+              <Button color="primary" onPress={applyFilters} isLoading={loading}>
+                查询
+              </Button>
+              <Button variant="flat" onPress={resetFilters} isDisabled={loading}>
+                重置
+              </Button>
+            </div>
+
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+              <Button
+                variant="flat"
+                onPress={() => setPage((p) => Math.max(1, p - 1))}
+                isDisabled={loading || page <= 1}
+              >
+                上一页
+              </Button>
+              <Button
+                variant="flat"
+                onPress={() => setPage((p) => p + 1)}
+                isDisabled={loading || (lastPage != null && page >= lastPage)}
+              >
+                下一页
+              </Button>
+              <Input
+                label="页码"
+                type="number"
+                value={String(page)}
+                onValueChange={(v) => {
+                  const next = Math.max(1, Number(v) || 1);
+                  setPage(lastPage != null ? clamp(next, 1, lastPage) : next);
+                }}
+                style={{ width: 140 }}
+              />
+              <div className="muted" style={{ fontSize: 12 }}>
+                {total == null
+                  ? '—'
+                  : `共 ${total} 条 · 第 ${page}${lastPage != null ? ` / ${lastPage}` : ''} 页`}
+              </div>
+            </div>
+
+            {error ? <div style={{ color: '#b91c1c' }}>{error}</div> : null}
+
           <Table aria-label="refunds">
             <TableHeader>
               <TableColumn>时间</TableColumn>
@@ -42,7 +289,7 @@ export const RefundsPage = () => {
               <TableColumn>状态</TableColumn>
               <TableColumn>错误</TableColumn>
             </TableHeader>
-            <TableBody items={items} emptyContent="暂无记录">
+            <TableBody items={items} emptyContent={loading ? '加载中…' : '暂无记录'}>
               {(item) => (
                 <TableRow key={item.id}>
                   <TableCell>{new Date(item.created_at).toLocaleString()}</TableCell>
@@ -66,6 +313,7 @@ export const RefundsPage = () => {
               )}
             </TableBody>
           </Table>
+          </div>
         </CardBody>
       </Card>
     </div>
