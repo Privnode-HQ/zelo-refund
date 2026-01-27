@@ -16,14 +16,24 @@ const publicSensitiveKeys = new Set([
   'out_refund_no'
 ]);
 
+const isPublicSensitiveKey = (key: string) => {
+  if (publicSensitiveKeys.has(key)) return true;
+  const lowered = key.toLowerCase();
+  if (lowered.includes('email')) return true;
+  if (lowered.includes('phone') || lowered.includes('mobile')) return true;
+  if (/(^|_)(tel|telephone)(_|$)/.test(lowered)) return true;
+  return false;
+};
+
 const redactText = (text: string) =>
   text
     .replace(/\bch_[A-Za-z0-9]+\b/g, 'ch_[redacted]')
     .replace(/\bpi_[A-Za-z0-9]+\b/g, 'pi_[redacted]')
-    .replace(/\bcus_[A-Za-z0-9]+\b/g, 'cus_[redacted]');
+    .replace(/\bcus_[A-Za-z0-9]+\b/g, 'cus_[redacted]')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[redacted_email]');
 
 const redactForPublic = (value: unknown, key?: string): unknown => {
-  if (key && publicSensitiveKeys.has(key)) {
+  if (key && isPublicSensitiveKey(key)) {
     return '[redacted]';
   }
 
@@ -42,7 +52,7 @@ const redactForPublic = (value: unknown, key?: string): unknown => {
     const obj = value as Record<string, unknown>;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj)) {
-      if (publicSensitiveKeys.has(k)) {
+      if (isPublicSensitiveKey(k)) {
         out[k] = '[redacted]';
         continue;
       }
