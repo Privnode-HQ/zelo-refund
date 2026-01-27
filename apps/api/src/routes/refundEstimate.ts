@@ -390,7 +390,7 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
     throw new Error('invalid_user_ids');
   }
 
-  const MAX_USERS = 500;
+  const MAX_USERS = 1500;
   if (userIds.length > MAX_USERS) {
     throw new Error(`too_many_user_ids:${MAX_USERS}`);
   }

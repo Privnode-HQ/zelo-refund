@@ -312,6 +312,8 @@ usersRouter.post('/:userId/refund', async (req, res) => {
     const BodySchema = z.object({
       amount_yuan: z.string().optional(),
       fee_percent: z.union([z.string(), z.number()]).optional(),
+      min_refund_yuan: z.string().optional(),
+      max_refund_yuan: z.string().optional(),
       clear_balance: z.boolean().optional().default(false),
       dry_run: z.boolean().optional().default(false)
     });
@@ -357,6 +359,52 @@ usersRouter.post('/:userId/refund', async (req, res) => {
     const { feeCents, netCents } = applyFeeToCents(grossCents, feeBps);
     if (netCents <= 0n) {
       return res.status(400).json({ error: 'fee_too_high' });
+    }
+
+    const parseOptionalYuanToCents = (input: string | undefined) => {
+      const trimmed = (input ?? '').trim();
+      if (!trimmed) return null;
+      const cents = yuanStringToCents(trimmed);
+      if (cents < 0n) {
+        throw new Error('negative_amount');
+      }
+      return cents;
+    };
+
+    let minRefundCents: bigint | null = null;
+    let maxRefundCents: bigint | null = null;
+    try {
+      minRefundCents = parseOptionalYuanToCents(parsed.data.min_refund_yuan);
+    } catch {
+      return res.status(400).json({ error: 'invalid_min_refund_amount' });
+    }
+    try {
+      maxRefundCents = parseOptionalYuanToCents(parsed.data.max_refund_yuan);
+    } catch {
+      return res.status(400).json({ error: 'invalid_max_refund_amount' });
+    }
+
+    if (minRefundCents !== null && maxRefundCents !== null && minRefundCents > maxRefundCents) {
+      return res.status(400).json({ error: 'invalid_refund_amount_range' });
+    }
+
+    if (
+      (minRefundCents !== null && netCents < minRefundCents) ||
+      (maxRefundCents !== null && netCents > maxRefundCents)
+    ) {
+      const rangeDesc = (() => {
+        if (minRefundCents !== null && maxRefundCents !== null) {
+          return `[${centsToYuanString(minRefundCents)}, ${centsToYuanString(maxRefundCents)}]`;
+        }
+        if (minRefundCents !== null) {
+          return `>= ${centsToYuanString(minRefundCents)}`;
+        }
+        return `<= ${centsToYuanString(maxRefundCents ?? 0n)}`;
+      })();
+      return res.status(409).json({
+        error: 'refund_amount_out_of_range',
+        message: `refund_amount_out_of_range: 实际退款 ${centsToYuanString(netCents)} 不在限制范围 ${rangeDesc}`
+      });
     }
 
     if (parsed.data.dry_run) {
@@ -406,6 +454,8 @@ usersRouter.post('/:userId/refund', async (req, res) => {
       mysql_user_id: userId,
       amount_yuan: parsed.data.amount_yuan ?? null,
       fee_percent: parsed.data.fee_percent ?? null,
+      min_refund_yuan: parsed.data.min_refund_yuan ?? null,
+      max_refund_yuan: parsed.data.max_refund_yuan ?? null,
       clear_balance: parsed.data.clear_balance,
       dry_run: parsed.data.dry_run
     });

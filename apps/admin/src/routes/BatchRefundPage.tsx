@@ -20,6 +20,7 @@ import {
 } from '@heroui/react';
 import { apiFetch } from '../lib/api';
 import { DEFAULT_FEE_PERCENT, applyFeeToCents, parsePercentToBps } from '../lib/fee';
+import { centsToYuanString, tryYuanStringToCents } from '../lib/money';
 import { parseUserIds } from '../lib/userIds';
 
 type BatchRefundResult = {
@@ -92,6 +93,8 @@ export const BatchRefundPage = () => {
   const [dryRun, setDryRun] = useState<boolean>(false);
   const [scope, setScope] = useState<RefundScope>('all');
   const [feePercent, setFeePercent] = useState<string>(DEFAULT_FEE_PERCENT);
+  const [minRefundYuan, setMinRefundYuan] = useState<string>('');
+  const [maxRefundYuan, setMaxRefundYuan] = useState<string>('');
 
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,6 +115,33 @@ export const BatchRefundPage = () => {
     return parsePercentToBps(feePercent) !== null;
   }, [feePercent]);
 
+  const refundAmountRange = useMemo(() => {
+    const parse = (input: string) => {
+      const trimmed = input.trim();
+      if (!trimmed) return { cents: null as bigint | null, valid: true };
+      const cents = tryYuanStringToCents(trimmed);
+      if (cents === null || cents < 0n) return { cents: null as bigint | null, valid: false };
+      return { cents, valid: true };
+    };
+
+    const min = parse(minRefundYuan);
+    const max = parse(maxRefundYuan);
+    const orderInvalid =
+      min.valid && max.valid && min.cents !== null && max.cents !== null ? min.cents > max.cents : false;
+    const valid = min.valid && max.valid && !orderInvalid;
+
+    const enabled = min.cents !== null || max.cents !== null;
+    const label = (() => {
+      if (!enabled) return '不限';
+      const parts: string[] = [];
+      if (min.cents !== null) parts.push(`>= ${centsToYuanString(min.cents)}`);
+      if (max.cents !== null) parts.push(`<= ${centsToYuanString(max.cents)}`);
+      return parts.join(' 且 ');
+    })();
+
+    return { min, max, enabled, label, valid, orderInvalid };
+  }, [maxRefundYuan, minRefundYuan]);
+
   const summary = useMemo(() => {
     const total = results.length;
     const succeeded = results.filter((r) => r.status === 'succeeded').length;
@@ -130,6 +160,15 @@ export const BatchRefundPage = () => {
       return;
     }
 
+    if (!refundAmountRange.valid) {
+      if (refundAmountRange.orderInvalid) {
+        setError('金额范围错误：最大退款金额不能小于最小退款金额');
+        return;
+      }
+      setError('金额范围格式错误：请输入金额（例如 12.34）；留空则不限制');
+      return;
+    }
+
     const { userIds } = parseUserIds(rawUserIds);
     if (!userIds.length) {
       setError('请输入用户ID（逗号或换行分割）');
@@ -139,7 +178,7 @@ export const BatchRefundPage = () => {
     const confirmed = window.confirm(
       `即将对 ${userIds.length} 个用户执行${dryRun ? '模拟退款' : '退款'}（范围：${scopeLabel(scope)}；手续费：${
         feePercent.trim() ? feePercent.trim() : DEFAULT_FEE_PERCENT
-      }%），是否继续？`
+      }%；金额限制(实际退款)：${refundAmountRange.label}），是否继续？`
     );
     if (!confirmed) return;
 
@@ -179,6 +218,42 @@ export const BatchRefundPage = () => {
             const stripeNetPlanCents = netDueCents > stripeCapacityCents ? stripeCapacityCents : netDueCents;
             const yipayNetPlanCents = netDueCents - stripeNetPlanCents;
 
+            const minCents = refundAmountRange.min.cents;
+            if (minCents !== null && netDueCents < minCents) {
+              setResults((prev) =>
+                prev.map((r) =>
+                  r.userId === userId
+                    ? {
+                        ...r,
+                        status: 'skipped',
+                        error: `不符合金额限制：实际退款 ${centsToYuanString(netDueCents)} < ${centsToYuanString(
+                          minCents
+                        )}`
+                      }
+                    : r
+                )
+              );
+              continue;
+            }
+
+            const maxCents = refundAmountRange.max.cents;
+            if (maxCents !== null && netDueCents > maxCents) {
+              setResults((prev) =>
+                prev.map((r) =>
+                  r.userId === userId
+                    ? {
+                        ...r,
+                        status: 'skipped',
+                        error: `不符合金额限制：实际退款 ${centsToYuanString(netDueCents)} > ${centsToYuanString(
+                          maxCents
+                        )}`
+                      }
+                    : r
+                )
+              );
+              continue;
+            }
+
             if (scope === 'stripe_only' && yipayNetPlanCents > 0n) {
               setResults((prev) =>
                 prev.map((r) =>
@@ -211,7 +286,9 @@ export const BatchRefundPage = () => {
             body: JSON.stringify({
               clear_balance: clearBalance,
               dry_run: dryRun,
-              fee_percent: feePercent.trim() ? feePercent.trim() : undefined
+              fee_percent: feePercent.trim() ? feePercent.trim() : undefined,
+              min_refund_yuan: refundAmountRange.min.cents !== null ? minRefundYuan.trim() : undefined,
+              max_refund_yuan: refundAmountRange.max.cents !== null ? maxRefundYuan.trim() : undefined
             }),
             signal: controller.signal
           });
@@ -236,8 +313,15 @@ export const BatchRefundPage = () => {
           );
         } catch (e) {
           const message = e instanceof Error ? e.message : '退款失败';
-          const status: BatchRefundResult['status'] = message === 'nothing_to_refund' ? 'skipped' : 'failed';
-          const displayMessage = message === 'nothing_to_refund' ? '无可退金额' : message;
+          const isSkipped =
+            message === 'nothing_to_refund' || message.startsWith('refund_amount_out_of_range') || message === 'refund_amount_out_of_range';
+          const status: BatchRefundResult['status'] = isSkipped ? 'skipped' : 'failed';
+          const displayMessage = (() => {
+            if (message === 'nothing_to_refund') return '无可退金额';
+            if (message.startsWith('refund_amount_out_of_range:')) return message.split(':').slice(1).join(':').trim();
+            if (message === 'refund_amount_out_of_range') return '不符合金额限制：实际退款金额超出范围';
+            return message;
+          })();
           setResults((prev) =>
             prev.map((r) => (r.userId === userId ? { ...r, status, error: displayMessage } : r))
           );
@@ -247,7 +331,19 @@ export const BatchRefundPage = () => {
       abortRef.current = null;
       setRunning(false);
     }
-  }, [clearBalance, dryRun, feeBps, feeInputValid, feePercent, rawUserIds, running, scope]);
+  }, [
+    clearBalance,
+    dryRun,
+    feeBps,
+    feeInputValid,
+    feePercent,
+    maxRefundYuan,
+    minRefundYuan,
+    rawUserIds,
+    refundAmountRange,
+    running,
+    scope
+  ]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -295,6 +391,26 @@ export const BatchRefundPage = () => {
               description={`默认 ${DEFAULT_FEE_PERCENT}%；留空则使用默认`}
               style={{ maxWidth: 320 }}
             />
+
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+              <Input
+                label="最小退款(元)"
+                value={minRefundYuan}
+                onValueChange={setMinRefundYuan}
+                isInvalid={!refundAmountRange.min.valid || refundAmountRange.orderInvalid}
+                errorMessage={!refundAmountRange.min.valid ? '请输入金额，例如 12.34' : undefined}
+                description="按扣除手续费后的实际退款金额过滤；留空则不限制"
+                style={{ maxWidth: 260 }}
+              />
+              <Input
+                label="最大退款(元)"
+                value={maxRefundYuan}
+                onValueChange={setMaxRefundYuan}
+                isInvalid={!refundAmountRange.max.valid || refundAmountRange.orderInvalid}
+                errorMessage={!refundAmountRange.max.valid ? '请输入金额，例如 12.34' : refundAmountRange.orderInvalid ? '需 ≥ 最小退款金额' : undefined}
+                style={{ maxWidth: 260 }}
+              />
+            </div>
 
             <RadioGroup
               label="退款范围"
