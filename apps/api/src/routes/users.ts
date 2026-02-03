@@ -442,13 +442,35 @@ usersRouter.get('/:userId/refund-quote', async (req, res) => {
       refund: {
         due_yuan: centsToYuanString(quote.dueCents),
         due_cents: quote.dueCents.toString(),
+        formula: 'sum(max(0, p_i - u_i))',
+        algo_version: 2,
         plan: {
           stripe_yuan: centsToYuanString(quote.plan.stripeCents),
           stripe_cents: quote.plan.stripeCents.toString(),
           yipay_yuan: centsToYuanString(quote.plan.yipayCents),
           yipay_cents: quote.plan.yipayCents.toString()
         }
-      }
+      },
+      refund_algo: quote.refundAlgo
+        ? {
+            version: quote.refundAlgo.version,
+            used_total_quota: quote.refundAlgo.used_total_quota.toString(),
+            due_quota: quote.refundAlgo.due_quota.toString(),
+            due_cents_unclamped: quote.refundAlgo.due_cents_unclamped.toString(),
+            orders_total: quote.refundAlgo.orders_sorted.length,
+            orders_preview: quote.refundAlgo.orders_sorted.slice(0, 50).map((o) => ({
+              id: o.id,
+              created_at: o.created_at,
+              paid_cents: o.paid_cents.toString(),
+              paid_quota: o.paid_quota.toString(),
+              grant_quota: o.grant_quota.toString(),
+              promo_ratio_num: o.promo_ratio_num.toString(),
+              promo_ratio_den: o.promo_ratio_den.toString(),
+              used_alloc_quota: o.used_alloc_quota.toString(),
+              refundable_quota: o.refundable_quota.toString()
+            }))
+          }
+        : null
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown_error';

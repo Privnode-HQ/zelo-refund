@@ -182,7 +182,7 @@ export const UserRefundPage = () => {
     const feePercentValue = feePercent.trim() ? feePercent.trim() : DEFAULT_FEE_PERCENT;
 
     return {
-      version: 1,
+      version: 2,
       computed_at: new Date().toISOString(),
       mysql_user_id: userId ?? null,
       steps: [
