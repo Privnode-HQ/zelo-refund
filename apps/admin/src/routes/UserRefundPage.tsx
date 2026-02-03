@@ -43,6 +43,8 @@ type RefundQuote = {
   refund: {
     due_yuan: string;
     due_cents: string;
+    formula?: string;
+    algo_version?: number;
     plan: {
       stripe_yuan: string;
       stripe_cents: string;
@@ -50,6 +52,24 @@ type RefundQuote = {
       yipay_cents: string;
     };
   };
+  refund_algo?: {
+    version: number;
+    used_total_quota: string;
+    due_quota: string;
+    due_cents_unclamped: string;
+    orders_total: number;
+    orders_preview: Array<{
+      id: string;
+      created_at: number;
+      paid_cents: string;
+      paid_quota: string;
+      grant_quota: string;
+      promo_ratio_num: string;
+      promo_ratio_den: string;
+      used_alloc_quota: string;
+      refundable_quota: string;
+    }>;
+  } | null;
 };
 
 type RefundOperation = {
@@ -115,6 +135,8 @@ export const UserRefundPage = () => {
     }
     return 0n;
   };
+
+  const quotaToYuanString = (quota: bigint) => centsToYuanString(quota / 5000n);
 
   const feeBps = useMemo(() => {
     const parsed = parsePercentToBps(feePercent);
@@ -207,8 +229,8 @@ export const UserRefundPage = () => {
             yipay_net_paid_cents: yipayNetPaidCents.toString(),
             total_net_paid_yuan: quote.amounts.total_net_paid_yuan,
             total_net_paid_cents: totalNetPaidCents.toString(),
-            formula: 'sum(max(0, p_i - u_i))',
-            version: 2,
+            formula: quote.refund.formula ?? 'sum(max(0, p_i - u_i))',
+            algo_version: quote.refund.algo_version ?? 2,
             sorting: 'r desc, g desc, created_at asc',
             r_definition: 'r = (g - p) / g (g>0 else 0)'
           }
@@ -219,6 +241,7 @@ export const UserRefundPage = () => {
           detail: {
             due_yuan: quote.refund.due_yuan,
             due_cents: quote.refund.due_cents,
+            refund_algo: quote.refund_algo ?? null,
             plan: {
               stripe_yuan: quote.refund.plan.stripe_yuan,
               stripe_cents: quote.refund.plan.stripe_cents,
@@ -448,7 +471,46 @@ export const UserRefundPage = () => {
                 {quote.amounts.total_net_paid_yuan}
               </div>
               <div className="muted">应退 = Σ max(0, p_i - u_i)，u_i 由已用额度 U 按 (r, g, 创建时间) 分配</div>
+              <div className="muted">
+                公式：{quote.refund.formula ?? 'sum(max(0, p_i - u_i))'}（v{quote.refund.algo_version ?? 2}）
+              </div>
               <div className="muted">易支付历史退款：{quote.amounts.yipay_refunded_yuan}</div>
+              {quote.refund_algo?.orders_preview?.length ? (
+                <details>
+                  <summary className="muted">
+                    算法明细（前{quote.refund_algo.orders_preview.length}笔 / 共{quote.refund_algo.orders_total}笔）
+                  </summary>
+                  <Table aria-label="refund algo preview">
+                    <TableHeader>
+                      <TableColumn>订单</TableColumn>
+                      <TableColumn>创建时间</TableColumn>
+                      <TableColumn>实付(元)</TableColumn>
+                      <TableColumn>获得额度(元)</TableColumn>
+                      <TableColumn>归因用量(元)</TableColumn>
+                      <TableColumn>可退(元)</TableColumn>
+                    </TableHeader>
+                    <TableBody>
+                      {quote.refund_algo.orders_preview.map((o) => {
+                        const paidCents = toBigInt(o.paid_cents);
+                        const grantQuota = toBigInt(o.grant_quota);
+                        const usedQuota = toBigInt(o.used_alloc_quota);
+                        const refundableQuota = toBigInt(o.refundable_quota);
+                        const createdAtIso = o.created_at ? new Date(o.created_at * 1000).toISOString() : '-';
+                        return (
+                          <TableRow key={o.id}>
+                            <TableCell style={{ fontFamily: 'monospace' }}>{o.id}</TableCell>
+                            <TableCell style={{ fontFamily: 'monospace' }}>{createdAtIso}</TableCell>
+                            <TableCell style={{ fontFamily: 'monospace' }}>{centsToYuanString(paidCents)}</TableCell>
+                            <TableCell style={{ fontFamily: 'monospace' }}>{quotaToYuanString(grantQuota)}</TableCell>
+                            <TableCell style={{ fontFamily: 'monospace' }}>{quotaToYuanString(usedQuota)}</TableCell>
+                            <TableCell style={{ fontFamily: 'monospace' }}>{quotaToYuanString(refundableQuota)}</TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </details>
+              ) : null}
               <Divider />
               <div>
                 <strong>自动退款计划（扣手续费后）：</strong>

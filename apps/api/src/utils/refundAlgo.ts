@@ -79,14 +79,14 @@ export const computeRefundDueV2 = (orders: RefundAlgoOrder[], usedTotalQuota: bi
   });
 
   const U = clampNonNegative(usedTotalQuota);
-  let prefixSum = 0n;
+  let allocatedSum = 0n;
   let totalRefundableQuota = 0n;
 
   for (const o of sorted) {
-    const remaining = U - prefixSum;
+    const remaining = U - allocatedSum;
     const u = remaining <= 0n ? 0n : remaining >= o.grant_quota ? o.grant_quota : remaining;
-    prefixSum += o.grant_quota;
     o.used_alloc_quota = u;
+    allocatedSum += u;
 
     const refundable = o.paid_quota > u ? o.paid_quota - u : 0n;
     o.refundable_quota = refundable;
@@ -100,4 +100,3 @@ export const computeRefundDueV2 = (orders: RefundAlgoOrder[], usedTotalQuota: bi
     orders_sorted: sorted
   };
 };
-
