@@ -92,14 +92,14 @@ type YipayTopupAlgoRow = {
   user_id: string | number;
   trade_no: string;
   money_cents: string | number;
-  amount: string | number;
+  amount_cents: string | number;
   created_ts: number;
 };
 
 type StripeTopupAlgoRow = {
   user_id: string | number;
   trade_no: string;
-  amount: string | number;
+  amount_cents: string | number;
 };
 
 type StripeChargeAlgo = {
@@ -149,7 +149,7 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
         user_id,
         trade_no,
         cast(round(money * 100) as signed) as money_cents,
-        amount,
+        cast(round(amount * 100) as signed) as amount_cents,
         unix_timestamp(create_time) as created_ts
       from top_ups
       where payment_method in ('alipay', 'wxpay')
@@ -167,7 +167,7 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
 
   const [stripeTopupRows] = await mysqlPool.query(
     `
-      select user_id, trade_no, amount
+      select user_id, trade_no, cast(round(amount * 100) as signed) as amount_cents
       from top_ups
       where payment_method = 'stripe'
         and status in ('success', 'refund')
@@ -179,10 +179,10 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
     if (!userId) continue;
     const tradeNo = String(row.trade_no ?? '').trim();
     if (!tradeNo) continue;
-    const amountQuota = asBigInt(row.amount ?? 0, 'amount');
-    if (amountQuota <= 0n) continue;
+    const amountCents = asBigInt(row.amount_cents ?? 0, 'amount_cents');
+    if (amountCents <= 0n) continue;
     const perUser = stripeGrantByUserTradeNo.get(userId) ?? new Map<string, bigint>();
-    perUser.set(tradeNo, amountQuota);
+    perUser.set(tradeNo, centsToQuota(amountCents));
     stripeGrantByUserTradeNo.set(userId, perUser);
   }
 
@@ -356,8 +356,8 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
         const paidCents = moneyCentsRaw > refundedCents ? moneyCentsRaw - refundedCents : 0n;
         yipayNet += paidCents;
 
-        const grantRaw = asBigInt(t.amount ?? 0, 'amount');
-        const grantOriginal = grantRaw > 0n ? grantRaw : centsToQuota(moneyCentsRaw);
+        const amountCents = asBigInt(t.amount_cents ?? 0, 'amount_cents');
+        const grantOriginal = amountCents > 0n ? centsToQuota(amountCents) : centsToQuota(moneyCentsRaw);
         const refundedQuota = yipayRefundedQuotaByTopup.get(tradeNo) ?? 0n;
         const grantQuota = grantOriginal > refundedQuota ? grantOriginal - refundedQuota : 0n;
 
@@ -601,7 +601,7 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
         user_id,
         trade_no,
         cast(round(money * 100) as signed) as money_cents,
-        amount,
+        cast(round(amount * 100) as signed) as amount_cents,
         unix_timestamp(create_time) as created_ts
       from top_ups
       where user_id in (?)
@@ -621,7 +621,7 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
 
   const [stripeTopupRows] = await mysqlPool.query(
     `
-      select user_id, trade_no, amount
+      select user_id, trade_no, cast(round(amount * 100) as signed) as amount_cents
       from top_ups
       where user_id in (?)
         and payment_method = 'stripe'
@@ -635,10 +635,10 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
     if (!userId) continue;
     const tradeNo = String(row.trade_no ?? '').trim();
     if (!tradeNo) continue;
-    const amountQuota = asBigInt(row.amount ?? 0, 'amount');
-    if (amountQuota <= 0n) continue;
+    const amountCents = asBigInt(row.amount_cents ?? 0, 'amount_cents');
+    if (amountCents <= 0n) continue;
     const perUser = stripeGrantByUserTradeNo.get(userId) ?? new Map<string, bigint>();
-    perUser.set(tradeNo, amountQuota);
+    perUser.set(tradeNo, centsToQuota(amountCents));
     stripeGrantByUserTradeNo.set(userId, perUser);
   }
 
@@ -754,8 +754,8 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
         const paidCents = moneyCentsRaw > refundedCents ? moneyCentsRaw - refundedCents : 0n;
         yipayNet += paidCents;
 
-        const grantRaw = asBigInt(t.amount ?? 0, 'amount');
-        const grantOriginal = grantRaw > 0n ? grantRaw : centsToQuota(moneyCentsRaw);
+        const amountCents = asBigInt(t.amount_cents ?? 0, 'amount_cents');
+        const grantOriginal = amountCents > 0n ? centsToQuota(amountCents) : centsToQuota(moneyCentsRaw);
         const refundedQuota = yipayRefundedQuotaByTopup.get(tradeNo) ?? 0n;
         const grantQuota = grantOriginal > refundedQuota ? grantOriginal - refundedQuota : 0n;
 

@@ -81,7 +81,14 @@ export const registerRefundCreateRoute = ({ router }: RefundCreateRouterOptions)
         return res.status(409).json({ error: 'topup_missing_user' });
       }
 
-      const amountQuota = asBigInt(topup.amount ?? 0, 'amount');
+      const amountQuota = (() => {
+        try {
+          const cents = yuanStringToCents(String(topup.amount ?? '0'));
+          return centsToQuota(cents);
+        } catch {
+          return 0n;
+        }
+      })();
       const userQuota = asBigInt(topup.user_quota ?? 0, 'user_quota');
 
       let quotaDelta: bigint | null = null;

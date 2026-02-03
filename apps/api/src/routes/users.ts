@@ -33,13 +33,13 @@ type YipayTopupRow = {
 type RefundAlgoYipayTopupRow = {
   trade_no: string;
   money_cents: string | number;
-  amount: string | number;
+  amount_cents: string | number;
   created_ts: number;
 };
 
 type RefundAlgoStripeTopupRow = {
   trade_no: string;
-  amount: string | number;
+  amount_cents: string | number;
 };
 
 const requireSupabase = () => {
@@ -118,7 +118,7 @@ const listUserYipayTopupsForAlgo = async (userId: string) => {
       select
         trade_no,
         cast(round(money * 100) as signed) as money_cents,
-        amount,
+        cast(round(amount * 100) as signed) as amount_cents,
         unix_timestamp(create_time) as created_ts
       from top_ups
       where user_id = ?
@@ -133,7 +133,7 @@ const listUserYipayTopupsForAlgo = async (userId: string) => {
 const listUserStripeTopupsForAlgo = async (userId: string) => {
   const [rows] = await mysqlPool.execute(
     `
-      select trade_no, amount
+      select trade_no, cast(round(amount * 100) as signed) as amount_cents
       from top_ups
       where user_id = ?
         and payment_method = 'stripe'
@@ -214,9 +214,9 @@ const buildRefundQuote = async (userId: string) => {
   for (const t of stripeTopups) {
     const tradeNo = String(t.trade_no ?? '').trim();
     if (!tradeNo) continue;
-    const amountQuota = asBigInt(t.amount ?? 0, 'amount');
-    if (amountQuota <= 0n) continue;
-    stripeGrantByTradeNo.set(tradeNo, amountQuota);
+    const amountCents = asBigInt(t.amount_cents ?? 0, 'amount_cents');
+    if (amountCents <= 0n) continue;
+    stripeGrantByTradeNo.set(tradeNo, centsToQuota(amountCents));
   }
 
   const stripeCustomer = user.stripe_customer ? String(user.stripe_customer) : '';
@@ -274,8 +274,8 @@ const buildRefundQuote = async (userId: string) => {
         return paidCentsRaw > already ? paidCentsRaw - already : 0n;
       })();
 
-      const amountQuotaRaw = asBigInt(t.amount ?? 0, 'amount');
-      const amountQuota = amountQuotaRaw > 0n ? amountQuotaRaw : centsToQuota(paidCentsRaw);
+      const amountCents = asBigInt(t.amount_cents ?? 0, 'amount_cents');
+      const amountQuota = amountCents > 0n ? centsToQuota(amountCents) : centsToQuota(paidCentsRaw);
       const alreadyQuota = yipayRefundedQuotaByTopup.get(tradeNo) ?? 0n;
       const grantQuota = amountQuota > alreadyQuota ? amountQuota - alreadyQuota : 0n;
 

@@ -132,7 +132,7 @@ docker compose up --build
 ## Stripe 特别说明
 
 - `top_ups.money` 对于 `stripe` 订单不可信：整体退款实付金额以 Stripe Charge 为准
-- `top_ups.amount`（额度）用于参与应退测算；若 `top_ups.trade_no` 能匹配 `ch_...` / `pi_...` 则优先用来获取该笔订单额度，否则按“无赠送”处理
+- `top_ups.amount` 存的是“获得额度折算成元”（不是 quota）：用于参与应退测算（会按 `amount_yuan * 500000` 换算成 quota）；若 `top_ups.trade_no` 能匹配 `ch_...` / `pi_...` 则优先用来获取该笔订单额度，否则按“无赠送”处理
 - 退款会通过 `users.stripe_customer`（`cus_...`）自动拉取该 Customer 的 Stripe Charge 列表并优先退款
 
 ## 目录
