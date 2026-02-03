@@ -13,7 +13,7 @@ import {
 } from '../utils/quota.js';
 import { DEFAULT_FEE_BPS, applyFeeToCents, parseFeePercentToBps } from '../utils/fee.js';
 import { isUuid } from '../utils/uuid.js';
-import { computeRefundDueV2 } from '../utils/refundAlgo.js';
+import { computeRefundDueV2, withSyntheticGiftPoolOrder } from '../utils/refundAlgo.js';
 
 type MysqlUserRow = {
   id: string;
@@ -304,7 +304,10 @@ const buildRefundQuote = async (userId: string) => {
     })
   ].filter((o) => o.paid_cents > 0n || o.grant_quota > 0n);
 
-  const algo = computeRefundDueV2(algoOrders, usedQuota);
+  const { orders: algoOrdersWithGiftPool, gift_pool_quota, total_grant_quota, total_user_quota } =
+    withSyntheticGiftPoolOrder(algoOrders, quota + usedQuota);
+
+  const algo = computeRefundDueV2(algoOrdersWithGiftPool, usedQuota);
   const dueCentsUnclamped = algo.due_cents;
   const dueCents = dueCentsUnclamped > totalNetPaidCents ? totalNetPaidCents : dueCentsUnclamped;
 
@@ -339,6 +342,9 @@ const buildRefundQuote = async (userId: string) => {
       used_total_quota: algo.used_total_quota,
       due_quota: algo.due_quota,
       due_cents_unclamped: dueCentsUnclamped,
+      gift_pool_quota,
+      total_grant_quota,
+      total_user_quota,
       orders_sorted: algo.orders_sorted.map((o) => ({
         id: o.id,
         paid_cents: o.paid_cents,
@@ -457,6 +463,9 @@ usersRouter.get('/:userId/refund-quote', async (req, res) => {
             used_total_quota: quote.refundAlgo.used_total_quota.toString(),
             due_quota: quote.refundAlgo.due_quota.toString(),
             due_cents_unclamped: quote.refundAlgo.due_cents_unclamped.toString(),
+            gift_pool_quota: quote.refundAlgo.gift_pool_quota.toString(),
+            total_grant_quota: quote.refundAlgo.total_grant_quota.toString(),
+            total_user_quota: quote.refundAlgo.total_user_quota.toString(),
             orders_total: quote.refundAlgo.orders_sorted.length,
             orders_preview: quote.refundAlgo.orders_sorted.slice(0, 50).map((o) => ({
               id: o.id,
@@ -682,6 +691,9 @@ usersRouter.post('/:userId/refund', async (req, res) => {
       sorting: 'r desc, g desc, created_at asc',
       r_definition: 'r = (g - p) / g (g>0 else 0)',
       U_used_total_quota: quote.usedQuota.toString(),
+      synthetic_gift_pool_quota: quote.refundAlgo?.gift_pool_quota.toString() ?? '0',
+      orders_grant_total_quota: quote.refundAlgo?.total_grant_quota.toString() ?? '0',
+      user_total_quota: quote.refundAlgo?.total_user_quota.toString() ?? '0',
       orders_total: quote.refundAlgo?.orders_sorted.length ?? 0,
       orders_preview: algoOrderPreview,
       due_final_cents: quote.dueCents.toString(),

@@ -4,7 +4,7 @@ import { mysqlPool } from '../mysql.js';
 import { supabaseAdmin } from '../supabase.js';
 import { listCustomerCharges, stripeClient } from '../providers/stripe.js';
 import { asBigInt, centsToQuota, centsToYuanString } from '../utils/quota.js';
-import { computeRefundDueV2 } from '../utils/refundAlgo.js';
+import { computeRefundDueV2, withSyntheticGiftPoolOrder } from '../utils/refundAlgo.js';
 
 type RefundEstimateResult = {
   computed_at: string;
@@ -338,6 +338,7 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
 
   for (const u of users) {
     const userId = String(u.id);
+    const quota = asBigInt(u.quota ?? 0, 'quota');
     const usedQuota = asBigInt(u.used_quota ?? 0, 'used_quota');
     const customerId = u.stripe_customer ? String(u.stripe_customer).trim() : '';
     const stripeNet = customerId ? (stripeNetPaidByCustomerCny.get(customerId) ?? 0n) : 0n;
@@ -388,7 +389,8 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
     const totalNetPaid = stripeNet + yipayNet;
     if (totalNetPaid > 0n) payingUsers += 1;
 
-    const algo = computeRefundDueV2(orders, usedQuota);
+    const { orders: ordersWithGiftPool } = withSyntheticGiftPoolOrder(orders, quota + usedQuota);
+    const algo = computeRefundDueV2(ordersWithGiftPool, usedQuota);
     let due = algo.due_cents;
     if (due > totalNetPaid) due = totalNetPaid;
     if (due > 0n) refundableUsers += 1;
@@ -736,6 +738,7 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
     const u = userById.get(userId);
     if (!u) continue;
 
+    const quota = asBigInt(u.quota ?? 0, 'quota');
     const usedQuota = asBigInt(u.used_quota ?? 0, 'used_quota');
     const customerId = u.stripe_customer ? String(u.stripe_customer).trim() : '';
     const stripeNet = customerId ? (stripeNetPaidByCustomerCny.get(customerId) ?? 0n) : 0n;
@@ -786,7 +789,8 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
     const totalNetPaid = stripeNet + yipayNet;
     if (totalNetPaid > 0n) payingUsers += 1;
 
-    const algo = computeRefundDueV2(orders, usedQuota);
+    const { orders: ordersWithGiftPool } = withSyntheticGiftPoolOrder(orders, quota + usedQuota);
+    const algo = computeRefundDueV2(ordersWithGiftPool, usedQuota);
     let due = algo.due_cents;
     if (due > totalNetPaid) due = totalNetPaid;
     if (due > 0n) refundableUsers += 1;

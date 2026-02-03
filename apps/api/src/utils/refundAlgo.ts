@@ -24,6 +24,44 @@ export type RefundAlgoResult = {
 
 const clampNonNegative = (value: bigint) => (value < 0n ? 0n : value);
 
+export const SYNTHETIC_GIFT_POOL_ORDER_ID = 'synthetic:unattributed_gift_pool';
+
+export const withSyntheticGiftPoolOrder = (
+  orders: RefundAlgoOrder[],
+  totalUserQuota: bigint
+): {
+  orders: RefundAlgoOrder[];
+  total_grant_quota: bigint;
+  total_user_quota: bigint;
+  gift_pool_quota: bigint;
+} => {
+  const totalQuota = clampNonNegative(totalUserQuota);
+  let totalGrantQuota = 0n;
+  for (const o of orders) {
+    totalGrantQuota += clampNonNegative(o.grant_quota);
+  }
+
+  const giftPoolQuota = totalQuota > totalGrantQuota ? totalQuota - totalGrantQuota : 0n;
+  if (giftPoolQuota <= 0n) {
+    return { orders, total_grant_quota: totalGrantQuota, total_user_quota: totalQuota, gift_pool_quota: 0n };
+  }
+
+  return {
+    orders: [
+      ...orders,
+      {
+        id: SYNTHETIC_GIFT_POOL_ORDER_ID,
+        paid_cents: 0n,
+        grant_quota: giftPoolQuota,
+        created_at: 0
+      }
+    ],
+    total_grant_quota: totalGrantQuota,
+    total_user_quota: totalQuota,
+    gift_pool_quota: giftPoolQuota
+  };
+};
+
 const comparePromoRatioDesc = (
   a: Pick<RefundAlgoOrderComputed, 'grant_quota' | 'promo_ratio_num'>,
   b: Pick<RefundAlgoOrderComputed, 'grant_quota' | 'promo_ratio_num'>

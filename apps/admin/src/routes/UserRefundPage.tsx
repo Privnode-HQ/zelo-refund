@@ -57,6 +57,9 @@ type RefundQuote = {
     used_total_quota: string;
     due_quota: string;
     due_cents_unclamped: string;
+    gift_pool_quota?: string;
+    total_grant_quota?: string;
+    total_user_quota?: string;
     orders_total: number;
     orders_preview: Array<{
       id: string;
@@ -474,6 +477,17 @@ export const UserRefundPage = () => {
               <div className="muted">
                 公式：{quote.refund.formula ?? 'sum(max(0, p_i - u_i))'}（v{quote.refund.algo_version ?? 2}）
               </div>
+              {quote.refund_algo?.gift_pool_quota && toBigInt(quote.refund_algo.gift_pool_quota) > 0n ? (
+                <div className="muted">
+                  未归属赠送池：{quotaToYuanString(toBigInt(quote.refund_algo.gift_pool_quota))}
+                  {quote.refund_algo.total_grant_quota && quote.refund_algo.total_user_quota ? (
+                    <>
+                      （Σ订单获得额度 {quotaToYuanString(toBigInt(quote.refund_algo.total_grant_quota))} / 用户总额度{' '}
+                      {quotaToYuanString(toBigInt(quote.refund_algo.total_user_quota))}）
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="muted">易支付历史退款：{quote.amounts.yipay_refunded_yuan}</div>
               {quote.refund_algo?.orders_preview?.length ? (
                 <details>
@@ -496,9 +510,10 @@ export const UserRefundPage = () => {
                         const usedQuota = toBigInt(o.used_alloc_quota);
                         const refundableQuota = toBigInt(o.refundable_quota);
                         const createdAtIso = o.created_at ? new Date(o.created_at * 1000).toISOString() : '-';
+                        const orderLabel = o.id === 'synthetic:unattributed_gift_pool' ? '赠送池（synthetic）' : o.id;
                         return (
                           <TableRow key={o.id}>
-                            <TableCell style={{ fontFamily: 'monospace' }}>{o.id}</TableCell>
+                            <TableCell style={{ fontFamily: 'monospace' }}>{orderLabel}</TableCell>
                             <TableCell style={{ fontFamily: 'monospace' }}>{createdAtIso}</TableCell>
                             <TableCell style={{ fontFamily: 'monospace' }}>{centsToYuanString(paidCents)}</TableCell>
                             <TableCell style={{ fontFamily: 'monospace' }}>{quotaToYuanString(grantQuota)}</TableCell>

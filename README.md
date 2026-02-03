@@ -116,6 +116,9 @@ docker compose up --build
     - `p_i`：该单剩余实付金额换算成额度（已扣历史退款；`p_i = paid_cents * 5000`）
     - `g_i`：该单剩余额度（含赠送，按 `quota` 计；会扣掉历史退款对应的 `quota_delta`）
   - 用户全局：`U = users.used_quota`（已用额度，按 `quota` 计）
+  - 若系统存在「未归属到具体订单的赠送额度」（例如运营/补偿直接加到用户余额），会额外建模一笔 synthetic order：
+    - `g_pool = max(0, (quota + used_quota) - sum(g_i))`
+    - `p_pool = 0`
   - 排序（商家最优）：先算 `r_i = (g_i - p_i) / g_i`（`g_i=0` 时记为 0），按 `r` 降序；若相同按 `g` 降序；仍相同按创建时间更早优先
   - 将 `U` 依次分配到每单（前面的订单先“吃掉”已用额度）：
     - `u_i = max(0, min(g_i, U - sum(prev_g)))`
