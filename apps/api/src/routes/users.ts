@@ -13,6 +13,7 @@ import {
 } from '../utils/quota.js';
 import { DEFAULT_FEE_BPS, applyFeeToCents, parseFeePercentToBps } from '../utils/fee.js';
 import { isUuid } from '../utils/uuid.js';
+import { computeRefundDueV2 } from '../utils/refundAlgo.js';
 
 type MysqlUserRow = {
   id: string;
@@ -27,6 +28,18 @@ type YipayTopupRow = {
   money: number;
   payment_method: 'alipay' | 'wxpay';
   status: string;
+};
+
+type RefundAlgoYipayTopupRow = {
+  trade_no: string;
+  money_cents: string | number;
+  amount: string | number;
+  created_ts: number;
+};
+
+type RefundAlgoStripeTopupRow = {
+  trade_no: string;
+  amount: string | number;
 };
 
 const requireSupabase = () => {
@@ -89,7 +102,7 @@ const listRefundsForUserAccounting = async (userId: string) => {
   const sb = requireSupabase();
   const { data, error } = await sb
     .from('refunds')
-    .select('provider, topup_trade_no, refund_money_minor, status')
+    .select('provider, topup_trade_no, stripe_charge_id, refund_money_minor, quota_delta, status')
     .eq('mysql_user_id', userId)
     .in('status', ['pending', 'succeeded']);
 
@@ -97,6 +110,38 @@ const listRefundsForUserAccounting = async (userId: string) => {
     throw new Error(`supabase_error:${error.message}`);
   }
   return data ?? [];
+};
+
+const listUserYipayTopupsForAlgo = async (userId: string) => {
+  const [rows] = await mysqlPool.execute(
+    `
+      select
+        trade_no,
+        cast(round(money * 100) as signed) as money_cents,
+        amount,
+        unix_timestamp(create_time) as created_ts
+      from top_ups
+      where user_id = ?
+        and payment_method in ('alipay', 'wxpay')
+        and status in ('success', 'refund')
+    `,
+    [userId]
+  );
+  return (Array.isArray(rows) ? rows : []) as unknown as RefundAlgoYipayTopupRow[];
+};
+
+const listUserStripeTopupsForAlgo = async (userId: string) => {
+  const [rows] = await mysqlPool.execute(
+    `
+      select trade_no, amount
+      from top_ups
+      where user_id = ?
+        and payment_method = 'stripe'
+        and status in ('success', 'refund')
+    `,
+    [userId]
+  );
+  return (Array.isArray(rows) ? rows : []) as unknown as RefundAlgoStripeTopupRow[];
 };
 
 const buildRefundQuote = async (userId: string) => {
@@ -112,21 +157,67 @@ const buildRefundQuote = async (userId: string) => {
   const yipayPaidCents = await sumYipayPaidCents(userId);
   const refundsForAccounting = await listRefundsForUserAccounting(userId);
 
+  const yipayRefundedQuotaByTopup = new Map<string, bigint>();
   const yipayRefundedCents = refundsForAccounting
     .filter((r) => r.provider === 'yipay')
-    .reduce((sum, r) => sum + asBigInt(r.refund_money_minor ?? 0, 'refund_money_minor'), 0n);
+    .reduce((sum, r) => {
+      const cents = asBigInt(r.refund_money_minor ?? 0, 'refund_money_minor');
+
+      const tradeNo = r.topup_trade_no ? String(r.topup_trade_no) : '';
+      if (tradeNo) {
+        const deltaQuota = asBigInt(r.quota_delta ?? 0, 'quota_delta');
+        if (deltaQuota > 0n) {
+          const prev = yipayRefundedQuotaByTopup.get(tradeNo) ?? 0n;
+          yipayRefundedQuotaByTopup.set(tradeNo, prev + deltaQuota);
+        }
+      }
+
+      return sum + cents;
+    }, 0n);
 
   const yipayNetPaidCents = yipayPaidCents > yipayRefundedCents ? yipayPaidCents - yipayRefundedCents : 0n;
 
   let stripeCurrency: string | null = null;
   let stripeNetPaidCents = 0n;
+  let stripeChargesForAlgo: Array<{
+    id: string;
+    created: number;
+    payment_intent?: string;
+    currency: string;
+    amount_cents: bigint;
+    refunded_cents: bigint;
+    remaining_cents: bigint;
+  }> = [];
   let stripeRefundableCharges: Array<{
     id: string;
     created: number;
     payment_intent?: string;
     currency: string;
+    amount_cents: bigint;
+    refunded_cents: bigint;
     remaining_cents: bigint;
   }> = [];
+
+  const stripeRefundedQuotaByCharge = new Map<string, bigint>();
+  for (const r of refundsForAccounting) {
+    if (r.provider !== 'stripe') continue;
+    const chargeId = r.stripe_charge_id ? String(r.stripe_charge_id) : '';
+    if (!chargeId) continue;
+    const deltaQuota = asBigInt(r.quota_delta ?? 0, 'quota_delta');
+    if (deltaQuota <= 0n) continue;
+    const prev = stripeRefundedQuotaByCharge.get(chargeId) ?? 0n;
+    stripeRefundedQuotaByCharge.set(chargeId, prev + deltaQuota);
+  }
+
+  const stripeTopups = await listUserStripeTopupsForAlgo(userId);
+  const stripeGrantByTradeNo = new Map<string, bigint>();
+  for (const t of stripeTopups) {
+    const tradeNo = String(t.trade_no ?? '').trim();
+    if (!tradeNo) continue;
+    const amountQuota = asBigInt(t.amount ?? 0, 'amount');
+    if (amountQuota <= 0n) continue;
+    stripeGrantByTradeNo.set(tradeNo, amountQuota);
+  }
 
   const stripeCustomer = user.stripe_customer ? String(user.stripe_customer) : '';
   if (stripeCustomer && stripeClient) {
@@ -134,19 +225,25 @@ const buildRefundQuote = async (userId: string) => {
     for (const charge of charges) {
       if (!charge.paid) continue;
       if (charge.status !== 'succeeded') continue;
-      const remaining = BigInt(charge.amount - (charge.amount_refunded ?? 0));
+      const chargeAmount = BigInt(charge.amount);
+      const refundedAmount = BigInt(charge.amount_refunded ?? 0);
+      const remaining = chargeAmount > refundedAmount ? chargeAmount - refundedAmount : 0n;
       if (!stripeCurrency) stripeCurrency = charge.currency;
       if (stripeCurrency !== charge.currency) {
         throw new Error('stripe_multiple_currencies');
       }
+      const row = {
+        id: charge.id,
+        created: charge.created,
+        payment_intent: typeof charge.payment_intent === 'string' ? charge.payment_intent : undefined,
+        currency: charge.currency,
+        amount_cents: chargeAmount,
+        refunded_cents: refundedAmount,
+        remaining_cents: remaining
+      };
+      stripeChargesForAlgo.push(row);
       if (remaining > 0n) {
-        stripeRefundableCharges.push({
-          id: charge.id,
-          created: charge.created,
-          payment_intent: typeof charge.payment_intent === 'string' ? charge.payment_intent : undefined,
-          currency: charge.currency,
-          remaining_cents: remaining
-        });
+        stripeRefundableCharges.push(row);
         stripeNetPaidCents += remaining;
       }
     }
@@ -155,15 +252,61 @@ const buildRefundQuote = async (userId: string) => {
   }
 
   const totalNetPaidCents = stripeNetPaidCents + yipayNetPaidCents;
-  const totalQuota = quota + usedQuota;
-  const dueCents = (() => {
-    if (totalNetPaidCents <= 0n) return 0n;
-    if (quota <= 0n) return 0n;
-    if (totalQuota <= 0n) return 0n;
-    const raw = (totalNetPaidCents * quota) / totalQuota;
-    if (raw <= 0n) return 0n;
-    return raw > totalNetPaidCents ? totalNetPaidCents : raw;
-  })();
+
+  const yipayTopupsForAlgo = await listUserYipayTopupsForAlgo(userId);
+  const yipayRefundedCentsByTopup = new Map<string, bigint>();
+  for (const r of refundsForAccounting) {
+    if (r.provider !== 'yipay') continue;
+    const tradeNo = r.topup_trade_no ? String(r.topup_trade_no) : '';
+    if (!tradeNo) continue;
+    const cents = asBigInt(r.refund_money_minor ?? 0, 'refund_money_minor');
+    if (cents <= 0n) continue;
+    const prev = yipayRefundedCentsByTopup.get(tradeNo) ?? 0n;
+    yipayRefundedCentsByTopup.set(tradeNo, prev + cents);
+  }
+
+  const algoOrders = [
+    ...yipayTopupsForAlgo.map((t) => {
+      const tradeNo = String(t.trade_no ?? '').trim();
+      const paidCentsRaw = asBigInt(t.money_cents ?? 0, 'money_cents');
+      const paidCents = (() => {
+        const already = yipayRefundedCentsByTopup.get(tradeNo) ?? 0n;
+        return paidCentsRaw > already ? paidCentsRaw - already : 0n;
+      })();
+
+      const amountQuotaRaw = asBigInt(t.amount ?? 0, 'amount');
+      const amountQuota = amountQuotaRaw > 0n ? amountQuotaRaw : centsToQuota(paidCentsRaw);
+      const alreadyQuota = yipayRefundedQuotaByTopup.get(tradeNo) ?? 0n;
+      const grantQuota = amountQuota > alreadyQuota ? amountQuota - alreadyQuota : 0n;
+
+      return {
+        id: `yipay:${tradeNo}`,
+        paid_cents: paidCents,
+        grant_quota: grantQuota,
+        created_at: Number(t.created_ts ?? 0)
+      };
+    }),
+    ...stripeChargesForAlgo.map((c) => {
+      const originalGrantQuota =
+        stripeGrantByTradeNo.get(c.id) ??
+        (c.payment_intent ? stripeGrantByTradeNo.get(c.payment_intent) : undefined) ??
+        centsToQuota(c.amount_cents);
+
+      const alreadyQuota = stripeRefundedQuotaByCharge.get(c.id) ?? 0n;
+      const grantQuota = originalGrantQuota > alreadyQuota ? originalGrantQuota - alreadyQuota : 0n;
+
+      return {
+        id: `stripe:${c.id}`,
+        paid_cents: c.remaining_cents,
+        grant_quota: grantQuota,
+        created_at: c.created
+      };
+    })
+  ].filter((o) => o.paid_cents > 0n || o.grant_quota > 0n);
+
+  const algo = computeRefundDueV2(algoOrders, usedQuota);
+  const dueCentsUnclamped = algo.due_cents;
+  const dueCents = dueCentsUnclamped > totalNetPaidCents ? totalNetPaidCents : dueCentsUnclamped;
 
   const stripePlanCents = dueCents > stripeNetPaidCents ? stripeNetPaidCents : dueCents;
   const yipayPlanCents = dueCents - stripePlanCents;
@@ -191,6 +334,23 @@ const buildRefundQuote = async (userId: string) => {
     stripeRefundableCharges,
     totalNetPaidCents,
     dueCents,
+    refundAlgo: {
+      version: 2,
+      used_total_quota: algo.used_total_quota,
+      due_quota: algo.due_quota,
+      due_cents_unclamped: dueCentsUnclamped,
+      orders_sorted: algo.orders_sorted.map((o) => ({
+        id: o.id,
+        paid_cents: o.paid_cents,
+        paid_quota: o.paid_quota,
+        grant_quota: o.grant_quota,
+        promo_ratio_num: o.promo_ratio_num,
+        promo_ratio_den: o.promo_ratio_den,
+        used_alloc_quota: o.used_alloc_quota,
+        refundable_quota: o.refundable_quota,
+        created_at: o.created_at
+      }))
+    },
     plan: {
       stripeCents: stripePlanCents,
       yipayCents: yipayPlanCents
@@ -441,14 +601,16 @@ usersRouter.post('/:userId/refund', async (req, res) => {
 
     const computedAt = new Date().toISOString();
     const totalQuota = quote.quota + quote.usedQuota;
-    const dueRawCents =
-      quote.totalNetPaidCents > 0n && quote.quota > 0n && totalQuota > 0n
-        ? (quote.totalNetPaidCents * quote.quota) / totalQuota
-        : 0n;
-    const dueClampedCents = (() => {
-      if (dueRawCents <= 0n) return 0n;
-      return dueRawCents > quote.totalNetPaidCents ? quote.totalNetPaidCents : dueRawCents;
-    })();
+    const algoOrderPreview = quote.refundAlgo?.orders_sorted
+      ? quote.refundAlgo.orders_sorted.slice(0, 10).map((o) => ({
+          id: o.id,
+          created_at: o.created_at,
+          paid_cents: o.paid_cents.toString(),
+          grant_quota: o.grant_quota.toString(),
+          used_alloc_quota: o.used_alloc_quota.toString(),
+          refundable_quota: o.refundable_quota.toString()
+        }))
+      : [];
 
     addCalcStep('input', {
       mysql_user_id: userId,
@@ -493,12 +655,13 @@ usersRouter.post('/:userId/refund', async (req, res) => {
       }))
     });
     addCalcStep('quote.due', {
-      formula: 'floor(P * R / T)',
-      P_total_net_paid_cents: quote.totalNetPaidCents.toString(),
-      R_quota: quote.quota.toString(),
-      T_total_quota: totalQuota.toString(),
-      due_raw_cents: dueRawCents.toString(),
-      due_clamped_cents: dueClampedCents.toString(),
+      formula: 'sum(max(0, p_i - u_i))',
+      version: 2,
+      sorting: 'r desc, g desc, created_at asc',
+      r_definition: 'r = (g - p) / g (g>0 else 0)',
+      U_used_total_quota: quote.usedQuota.toString(),
+      orders_total: quote.refundAlgo?.orders_sorted.length ?? 0,
+      orders_preview: algoOrderPreview,
       due_final_cents: quote.dueCents.toString(),
       due_final_yuan: centsToYuanString(quote.dueCents),
       due_plan: {
@@ -532,7 +695,7 @@ usersRouter.post('/:userId/refund', async (req, res) => {
     });
 
     const calcTraceBase = {
-      version: 1,
+      version: 2,
       computed_at: computedAt,
       batch_id: batchId,
       mysql_user_id: userId,

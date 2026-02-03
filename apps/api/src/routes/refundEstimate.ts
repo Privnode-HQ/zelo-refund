@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { mysqlPool } from '../mysql.js';
 import { supabaseAdmin } from '../supabase.js';
 import { listCustomerCharges, stripeClient } from '../providers/stripe.js';
-import { asBigInt, centsToYuanString } from '../utils/quota.js';
+import { asBigInt, centsToQuota, centsToYuanString } from '../utils/quota.js';
+import { computeRefundDueV2 } from '../utils/refundAlgo.js';
 
 type RefundEstimateResult = {
   computed_at: string;
@@ -87,6 +88,30 @@ type RefundEstimateState = {
 
 let state: RefundEstimateState = { status: 'idle' };
 
+type YipayTopupAlgoRow = {
+  user_id: string | number;
+  trade_no: string;
+  money_cents: string | number;
+  amount: string | number;
+  created_ts: number;
+};
+
+type StripeTopupAlgoRow = {
+  user_id: string | number;
+  trade_no: string;
+  amount: string | number;
+};
+
+type StripeChargeAlgo = {
+  id: string;
+  created: number;
+  currency: string;
+  payment_intent?: string;
+  amount_cents: bigint;
+  refunded_cents: bigint;
+  remaining_cents: bigint;
+};
+
 const nowIso = () => new Date().toISOString();
 
 const asyncPool = async <T>(
@@ -117,37 +142,61 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
     state.progress.users_total = users.length;
   }
 
-  // 2) Yipay paid cents by user
-  const [yipayPaidRows] = await mysqlPool.query(
+  // 2) Load top_ups for algo (yipay + stripe grants)
+  const [yipayTopupRows] = await mysqlPool.query(
     `
       select
         user_id,
-        coalesce(sum(cast(round(money * 100) as signed)), 0) as total_cents
+        trade_no,
+        cast(round(money * 100) as signed) as money_cents,
+        amount,
+        unix_timestamp(create_time) as created_ts
       from top_ups
       where payment_method in ('alipay', 'wxpay')
         and status in ('success', 'refund')
-      group by user_id
     `
   );
-  const yipayPaidByUser = new Map<string, bigint>();
-  for (const row of (Array.isArray(yipayPaidRows) ? yipayPaidRows : []) as any[]) {
-    const userId = String(row.user_id);
-    const cents = asBigInt(row.total_cents ?? 0, 'yipay_total_cents');
-    if (cents > 0n) {
-      yipayPaidByUser.set(userId, cents);
-    }
+  const yipayTopupsByUser = new Map<string, YipayTopupAlgoRow[]>();
+  for (const row of (Array.isArray(yipayTopupRows) ? yipayTopupRows : []) as any[]) {
+    const userId = String(row.user_id ?? '');
+    if (!userId) continue;
+    const list = yipayTopupsByUser.get(userId) ?? [];
+    list.push(row as YipayTopupAlgoRow);
+    yipayTopupsByUser.set(userId, list);
   }
 
-  // 3) Yipay refunded cents by user (pending+succeeded)
-  const yipayRefundedByUser = new Map<string, bigint>();
+  const [stripeTopupRows] = await mysqlPool.query(
+    `
+      select user_id, trade_no, amount
+      from top_ups
+      where payment_method = 'stripe'
+        and status in ('success', 'refund')
+    `
+  );
+  const stripeGrantByUserTradeNo = new Map<string, Map<string, bigint>>();
+  for (const row of (Array.isArray(stripeTopupRows) ? stripeTopupRows : []) as any[]) {
+    const userId = String(row.user_id ?? '');
+    if (!userId) continue;
+    const tradeNo = String(row.trade_no ?? '').trim();
+    if (!tradeNo) continue;
+    const amountQuota = asBigInt(row.amount ?? 0, 'amount');
+    if (amountQuota <= 0n) continue;
+    const perUser = stripeGrantByUserTradeNo.get(userId) ?? new Map<string, bigint>();
+    perUser.set(tradeNo, amountQuota);
+    stripeGrantByUserTradeNo.set(userId, perUser);
+  }
+
+  // 3) Refund adjustments (pending+succeeded): yipay cash/quota by topup, stripe quota by charge
+  const yipayRefundedCashByTopup = new Map<string, bigint>();
+  const yipayRefundedQuotaByTopup = new Map<string, bigint>();
+  const stripeRefundedQuotaByCharge = new Map<string, bigint>();
   {
     const pageSize = 1000;
     let from = 0;
     for (;;) {
       const { data, error } = await supabaseAdmin
         .from('refunds')
-        .select('mysql_user_id, refund_money_minor, provider, status')
-        .eq('provider', 'yipay')
+        .select('provider, topup_trade_no, stripe_charge_id, refund_money_minor, quota_delta, status')
         .in('status', ['pending', 'succeeded'])
         .order('created_at', { ascending: true })
         .range(from, from + pageSize - 1);
@@ -158,12 +207,31 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
 
       const rows = data ?? [];
       for (const r of rows as any[]) {
-        const userId = String(r.mysql_user_id ?? '');
-        if (!userId) continue;
-        const cents = asBigInt(r.refund_money_minor ?? 0, 'refund_money_minor');
-        if (cents <= 0n) continue;
-        const prev = yipayRefundedByUser.get(userId) ?? 0n;
-        yipayRefundedByUser.set(userId, prev + cents);
+        const provider = String(r.provider ?? '');
+        if (provider === 'yipay') {
+          const tradeNo = r.topup_trade_no ? String(r.topup_trade_no) : '';
+          if (!tradeNo) continue;
+          const refundedCents = asBigInt(r.refund_money_minor ?? 0, 'refund_money_minor');
+          if (refundedCents > 0n) {
+            const prev = yipayRefundedCashByTopup.get(tradeNo) ?? 0n;
+            yipayRefundedCashByTopup.set(tradeNo, prev + refundedCents);
+          }
+          const deltaQuota = asBigInt(r.quota_delta ?? 0, 'quota_delta');
+          if (deltaQuota > 0n) {
+            const prev = yipayRefundedQuotaByTopup.get(tradeNo) ?? 0n;
+            yipayRefundedQuotaByTopup.set(tradeNo, prev + deltaQuota);
+          }
+        }
+
+        if (provider === 'stripe') {
+          const chargeId = r.stripe_charge_id ? String(r.stripe_charge_id) : '';
+          if (!chargeId) continue;
+          const deltaQuota = asBigInt(r.quota_delta ?? 0, 'quota_delta');
+          if (deltaQuota > 0n) {
+            const prev = stripeRefundedQuotaByCharge.get(chargeId) ?? 0n;
+            stripeRefundedQuotaByCharge.set(chargeId, prev + deltaQuota);
+          }
+        }
       }
 
       if (rows.length < pageSize) break;
@@ -171,7 +239,7 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
     }
   }
 
-  // 4) Stripe net paid cents by customer (only currency=cny, single currency)
+  // 4) Stripe charges by customer (only currency=cny, single currency)
   const stripeCustomers = Array.from(
     new Set(
       users
@@ -190,6 +258,7 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
   }
 
   const stripeNetPaidByCustomerCny = new Map<string, bigint>();
+  const stripeChargesByCustomerCny = new Map<string, StripeChargeAlgo[]>();
   let stripeCustomersFailed = 0;
   let stripeCustomersMultiCurrency = 0;
   let stripeCustomersNonCny = 0;
@@ -200,6 +269,7 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
         const charges = await listCustomerCharges(customerId);
         let currency: string | null = null;
         let net = 0n;
+        const items: StripeChargeAlgo[] = [];
         for (const ch of charges) {
           if (!ch.paid) continue;
           if (ch.status !== 'succeeded') continue;
@@ -208,10 +278,21 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
             currency = 'MULTI';
             break;
           }
-          const remaining = BigInt(ch.amount - (ch.amount_refunded ?? 0));
+          const amountCents = BigInt(ch.amount);
+          const refundedCents = BigInt(ch.amount_refunded ?? 0);
+          const remaining = amountCents > refundedCents ? amountCents - refundedCents : 0n;
           if (remaining > 0n) {
             net += remaining;
           }
+          items.push({
+            id: ch.id,
+            created: ch.created,
+            currency: ch.currency,
+            payment_intent: typeof ch.payment_intent === 'string' ? ch.payment_intent : undefined,
+            amount_cents: amountCents,
+            refunded_cents: refundedCents,
+            remaining_cents: remaining
+          });
         }
 
         if (currency === 'MULTI') {
@@ -227,6 +308,9 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
 
         if (net > 0n) {
           stripeNetPaidByCustomerCny.set(customerId, net);
+        }
+        if (items.length) {
+          stripeChargesByCustomerCny.set(customerId, items);
         }
       } catch {
         stripeCustomersFailed += 1;
@@ -254,24 +338,59 @@ const computeRefundEstimate = async (): Promise<RefundEstimateResult> => {
 
   for (const u of users) {
     const userId = String(u.id);
-    const quota = asBigInt(u.quota ?? 0, 'quota');
     const usedQuota = asBigInt(u.used_quota ?? 0, 'used_quota');
-    const totalQuota = quota + usedQuota;
-    const yipayPaid = yipayPaidByUser.get(userId) ?? 0n;
-    const yipayRefunded = yipayRefundedByUser.get(userId) ?? 0n;
-    const yipayNet = yipayPaid > yipayRefunded ? yipayPaid - yipayRefunded : 0n;
-
     const customerId = u.stripe_customer ? String(u.stripe_customer).trim() : '';
     const stripeNet = customerId ? (stripeNetPaidByCustomerCny.get(customerId) ?? 0n) : 0n;
+    const stripeCharges = customerId ? (stripeChargesByCustomerCny.get(customerId) ?? []) : [];
+
+    const yipayTopups = yipayTopupsByUser.get(userId) ?? [];
+    let yipayNet = 0n;
+
+    const perUserStripeGrant = stripeGrantByUserTradeNo.get(userId);
+
+    const orders = [
+      ...yipayTopups.map((t) => {
+        const tradeNo = String(t.trade_no ?? '').trim();
+        const moneyCentsRaw = asBigInt(t.money_cents ?? 0, 'money_cents');
+        const refundedCents = yipayRefundedCashByTopup.get(tradeNo) ?? 0n;
+        const paidCents = moneyCentsRaw > refundedCents ? moneyCentsRaw - refundedCents : 0n;
+        yipayNet += paidCents;
+
+        const grantRaw = asBigInt(t.amount ?? 0, 'amount');
+        const grantOriginal = grantRaw > 0n ? grantRaw : centsToQuota(moneyCentsRaw);
+        const refundedQuota = yipayRefundedQuotaByTopup.get(tradeNo) ?? 0n;
+        const grantQuota = grantOriginal > refundedQuota ? grantOriginal - refundedQuota : 0n;
+
+        return {
+          id: `yipay:${tradeNo}`,
+          paid_cents: paidCents,
+          grant_quota: grantQuota,
+          created_at: Number(t.created_ts ?? 0)
+        };
+      }),
+      ...stripeCharges.map((c) => {
+        const originalGrant =
+          perUserStripeGrant?.get(c.id) ??
+          (c.payment_intent ? perUserStripeGrant?.get(c.payment_intent) : undefined) ??
+          centsToQuota(c.amount_cents);
+
+        const refundedQuota = stripeRefundedQuotaByCharge.get(c.id) ?? 0n;
+        const grantQuota = originalGrant > refundedQuota ? originalGrant - refundedQuota : 0n;
+        return {
+          id: `stripe:${c.id}`,
+          paid_cents: c.remaining_cents,
+          grant_quota: grantQuota,
+          created_at: c.created
+        };
+      })
+    ].filter((o) => o.paid_cents > 0n || o.grant_quota > 0n);
 
     const totalNetPaid = stripeNet + yipayNet;
     if (totalNetPaid > 0n) payingUsers += 1;
 
-    let due = 0n;
-    if (totalNetPaid > 0n && quota > 0n && totalQuota > 0n) {
-      const raw = (totalNetPaid * quota) / totalQuota;
-      due = raw > 0n ? (raw > totalNetPaid ? totalNetPaid : raw) : 0n;
-    }
+    const algo = computeRefundDueV2(orders, usedQuota);
+    let due = algo.due_cents;
+    if (due > totalNetPaid) due = totalNetPaid;
     if (due > 0n) refundableUsers += 1;
 
     const stripePart = due > stripeNet ? stripeNet : due;
@@ -382,6 +501,78 @@ const fetchYipayRefundedByUser = async (userIds: string[]) => {
   return refundedByUser;
 };
 
+const fetchRefundAdjustmentsForUsers = async (userIds: string[]) => {
+  if (!supabaseAdmin) {
+    throw new Error('server_missing_supabase');
+  }
+
+  const yipayRefundedCashByTopup = new Map<string, bigint>();
+  const yipayRefundedQuotaByTopup = new Map<string, bigint>();
+  const stripeRefundedQuotaByCharge = new Map<string, bigint>();
+
+  const chunkSize = 100;
+  const pageSize = 1000;
+
+  for (let offset = 0; offset < userIds.length; offset += chunkSize) {
+    const chunk = userIds.slice(offset, offset + chunkSize);
+    if (!chunk.length) continue;
+
+    let from = 0;
+    for (;;) {
+      const { data, error } = await supabaseAdmin
+        .from('refunds')
+        .select('provider, topup_trade_no, stripe_charge_id, refund_money_minor, quota_delta, status, mysql_user_id')
+        .in('provider', ['yipay', 'stripe'])
+        .in('status', ['pending', 'succeeded'])
+        .in('mysql_user_id', chunk)
+        .order('created_at', { ascending: true })
+        .range(from, from + pageSize - 1);
+
+      if (error) {
+        throw new Error(`supabase_error:${error.message}`);
+      }
+
+      const rows = data ?? [];
+      for (const r of rows as any[]) {
+        const provider = String(r.provider ?? '');
+        if (provider === 'yipay') {
+          const tradeNo = r.topup_trade_no ? String(r.topup_trade_no) : '';
+          if (!tradeNo) continue;
+          const refundedCents = asBigInt(r.refund_money_minor ?? 0, 'refund_money_minor');
+          if (refundedCents > 0n) {
+            const prev = yipayRefundedCashByTopup.get(tradeNo) ?? 0n;
+            yipayRefundedCashByTopup.set(tradeNo, prev + refundedCents);
+          }
+          const deltaQuota = asBigInt(r.quota_delta ?? 0, 'quota_delta');
+          if (deltaQuota > 0n) {
+            const prev = yipayRefundedQuotaByTopup.get(tradeNo) ?? 0n;
+            yipayRefundedQuotaByTopup.set(tradeNo, prev + deltaQuota);
+          }
+        }
+
+        if (provider === 'stripe') {
+          const chargeId = r.stripe_charge_id ? String(r.stripe_charge_id) : '';
+          if (!chargeId) continue;
+          const deltaQuota = asBigInt(r.quota_delta ?? 0, 'quota_delta');
+          if (deltaQuota > 0n) {
+            const prev = stripeRefundedQuotaByCharge.get(chargeId) ?? 0n;
+            stripeRefundedQuotaByCharge.set(chargeId, prev + deltaQuota);
+          }
+        }
+      }
+
+      if (rows.length < pageSize) break;
+      from += pageSize;
+    }
+  }
+
+  return {
+    yipayRefundedCashByTopup,
+    yipayRefundedQuotaByTopup,
+    stripeRefundedQuotaByCharge
+  };
+};
+
 const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promise<RefundEstimateUsersResult> => {
   const startedAtMs = Date.now();
 
@@ -403,31 +594,56 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
   const foundIds = new Set(users.map((u) => String(u.id)));
   const notFoundIds = userIds.filter((id) => !foundIds.has(id));
 
-  // Yipay paid cents by user
-  const [yipayPaidRows] = await mysqlPool.query(
+  // Load top_ups for algo (yipay + stripe grants)
+  const [yipayTopupRows] = await mysqlPool.query(
     `
       select
         user_id,
-        coalesce(sum(cast(round(money * 100) as signed)), 0) as total_cents
+        trade_no,
+        cast(round(money * 100) as signed) as money_cents,
+        amount,
+        unix_timestamp(create_time) as created_ts
       from top_ups
       where user_id in (?)
         and payment_method in ('alipay', 'wxpay')
         and status in ('success', 'refund')
-      group by user_id
     `,
     [userIds]
   );
-  const yipayPaidByUser = new Map<string, bigint>();
-  for (const row of (Array.isArray(yipayPaidRows) ? yipayPaidRows : []) as any[]) {
-    const userId = String(row.user_id);
-    const cents = asBigInt(row.total_cents ?? 0, 'yipay_total_cents');
-    if (cents > 0n) {
-      yipayPaidByUser.set(userId, cents);
-    }
+  const yipayTopupsByUser = new Map<string, YipayTopupAlgoRow[]>();
+  for (const row of (Array.isArray(yipayTopupRows) ? yipayTopupRows : []) as any[]) {
+    const userId = String(row.user_id ?? '');
+    if (!userId) continue;
+    const list = yipayTopupsByUser.get(userId) ?? [];
+    list.push(row as YipayTopupAlgoRow);
+    yipayTopupsByUser.set(userId, list);
   }
 
-  // Yipay refunded cents by user (pending+succeeded)
-  const yipayRefundedByUser = await fetchYipayRefundedByUser(userIds);
+  const [stripeTopupRows] = await mysqlPool.query(
+    `
+      select user_id, trade_no, amount
+      from top_ups
+      where user_id in (?)
+        and payment_method = 'stripe'
+        and status in ('success', 'refund')
+    `,
+    [userIds]
+  );
+  const stripeGrantByUserTradeNo = new Map<string, Map<string, bigint>>();
+  for (const row of (Array.isArray(stripeTopupRows) ? stripeTopupRows : []) as any[]) {
+    const userId = String(row.user_id ?? '');
+    if (!userId) continue;
+    const tradeNo = String(row.trade_no ?? '').trim();
+    if (!tradeNo) continue;
+    const amountQuota = asBigInt(row.amount ?? 0, 'amount');
+    if (amountQuota <= 0n) continue;
+    const perUser = stripeGrantByUserTradeNo.get(userId) ?? new Map<string, bigint>();
+    perUser.set(tradeNo, amountQuota);
+    stripeGrantByUserTradeNo.set(userId, perUser);
+  }
+
+  const { yipayRefundedCashByTopup, yipayRefundedQuotaByTopup, stripeRefundedQuotaByCharge } =
+    await fetchRefundAdjustmentsForUsers(userIds);
 
   // Stripe net paid cents by customer (only currency=cny, single currency)
   const stripeCustomers = Array.from(
@@ -439,6 +655,7 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
   );
 
   const stripeNetPaidByCustomerCny = new Map<string, bigint>();
+  const stripeChargesByCustomerCny = new Map<string, StripeChargeAlgo[]>();
   const stripeCustomerStatus = new Map<string, { status: 'ok' | 'failed' | 'multi_currency' | 'non_cny' }>();
   let stripeCustomersFailed = 0;
   let stripeCustomersMultiCurrency = 0;
@@ -450,6 +667,7 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
         const charges = await listCustomerCharges(customerId);
         let currency: string | null = null;
         let net = 0n;
+        const items: StripeChargeAlgo[] = [];
         for (const ch of charges) {
           if (!ch.paid) continue;
           if (ch.status !== 'succeeded') continue;
@@ -458,10 +676,21 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
             currency = 'MULTI';
             break;
           }
-          const remaining = BigInt(ch.amount - (ch.amount_refunded ?? 0));
+          const amountCents = BigInt(ch.amount);
+          const refundedCents = BigInt(ch.amount_refunded ?? 0);
+          const remaining = amountCents > refundedCents ? amountCents - refundedCents : 0n;
           if (remaining > 0n) {
             net += remaining;
           }
+          items.push({
+            id: ch.id,
+            created: ch.created,
+            currency: ch.currency,
+            payment_intent: typeof ch.payment_intent === 'string' ? ch.payment_intent : undefined,
+            amount_cents: amountCents,
+            refunded_cents: refundedCents,
+            remaining_cents: remaining
+          });
         }
 
         if (currency === 'MULTI') {
@@ -480,6 +709,9 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
         stripeCustomerStatus.set(customerId, { status: 'ok' });
         if (net > 0n) {
           stripeNetPaidByCustomerCny.set(customerId, net);
+        }
+        if (items.length) {
+          stripeChargesByCustomerCny.set(customerId, items);
         }
       } catch {
         stripeCustomersFailed += 1;
@@ -504,24 +736,59 @@ const computeRefundEstimateForUsers = async (requestedUserIds: string[]): Promis
     const u = userById.get(userId);
     if (!u) continue;
 
-    const quota = asBigInt(u.quota ?? 0, 'quota');
     const usedQuota = asBigInt(u.used_quota ?? 0, 'used_quota');
-    const totalQuota = quota + usedQuota;
-    const yipayPaid = yipayPaidByUser.get(userId) ?? 0n;
-    const yipayRefunded = yipayRefundedByUser.get(userId) ?? 0n;
-    const yipayNet = yipayPaid > yipayRefunded ? yipayPaid - yipayRefunded : 0n;
-
     const customerId = u.stripe_customer ? String(u.stripe_customer).trim() : '';
     const stripeNet = customerId ? (stripeNetPaidByCustomerCny.get(customerId) ?? 0n) : 0n;
+    const stripeCharges = customerId ? (stripeChargesByCustomerCny.get(customerId) ?? []) : [];
+
+    const yipayTopups = yipayTopupsByUser.get(userId) ?? [];
+    let yipayNet = 0n;
+
+    const perUserStripeGrant = stripeGrantByUserTradeNo.get(userId);
+
+    const orders = [
+      ...yipayTopups.map((t) => {
+        const tradeNo = String(t.trade_no ?? '').trim();
+        const moneyCentsRaw = asBigInt(t.money_cents ?? 0, 'money_cents');
+        const refundedCents = yipayRefundedCashByTopup.get(tradeNo) ?? 0n;
+        const paidCents = moneyCentsRaw > refundedCents ? moneyCentsRaw - refundedCents : 0n;
+        yipayNet += paidCents;
+
+        const grantRaw = asBigInt(t.amount ?? 0, 'amount');
+        const grantOriginal = grantRaw > 0n ? grantRaw : centsToQuota(moneyCentsRaw);
+        const refundedQuota = yipayRefundedQuotaByTopup.get(tradeNo) ?? 0n;
+        const grantQuota = grantOriginal > refundedQuota ? grantOriginal - refundedQuota : 0n;
+
+        return {
+          id: `yipay:${tradeNo}`,
+          paid_cents: paidCents,
+          grant_quota: grantQuota,
+          created_at: Number(t.created_ts ?? 0)
+        };
+      }),
+      ...stripeCharges.map((c) => {
+        const originalGrant =
+          perUserStripeGrant?.get(c.id) ??
+          (c.payment_intent ? perUserStripeGrant?.get(c.payment_intent) : undefined) ??
+          centsToQuota(c.amount_cents);
+
+        const refundedQuota = stripeRefundedQuotaByCharge.get(c.id) ?? 0n;
+        const grantQuota = originalGrant > refundedQuota ? originalGrant - refundedQuota : 0n;
+        return {
+          id: `stripe:${c.id}`,
+          paid_cents: c.remaining_cents,
+          grant_quota: grantQuota,
+          created_at: c.created
+        };
+      })
+    ].filter((o) => o.paid_cents > 0n || o.grant_quota > 0n);
 
     const totalNetPaid = stripeNet + yipayNet;
     if (totalNetPaid > 0n) payingUsers += 1;
 
-    let due = 0n;
-    if (totalNetPaid > 0n && quota > 0n && totalQuota > 0n) {
-      const raw = (totalNetPaid * quota) / totalQuota;
-      due = raw > 0n ? (raw > totalNetPaid ? totalNetPaid : raw) : 0n;
-    }
+    const algo = computeRefundDueV2(orders, usedQuota);
+    let due = algo.due_cents;
+    if (due > totalNetPaid) due = totalNetPaid;
     if (due > 0n) refundableUsers += 1;
 
     const stripePart = due > stripeNet ? stripeNet : due;

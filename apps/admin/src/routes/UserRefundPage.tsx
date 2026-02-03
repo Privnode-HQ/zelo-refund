@@ -178,12 +178,6 @@ export const UserRefundPage = () => {
     const yipayNetPaidCents = tryYuanStringToCents(quote.amounts.yipay_net_paid_yuan) ?? 0n;
     const totalNetPaidCents = stripeNetPaidCents + yipayNetPaidCents;
 
-    const dueRawCents = qTotalQuota > 0n ? (totalNetPaidCents * qQuota) / qTotalQuota : 0n;
-    const dueClampedCents = (() => {
-      if (dueRawCents <= 0n) return 0n;
-      return dueRawCents > totalNetPaidCents ? totalNetPaidCents : dueRawCents;
-    })();
-
     const requested = amountYuan.trim() ? amountYuan.trim() : null;
     const feePercentValue = feePercent.trim() ? feePercent.trim() : DEFAULT_FEE_PERCENT;
 
@@ -213,15 +207,16 @@ export const UserRefundPage = () => {
             yipay_net_paid_cents: yipayNetPaidCents.toString(),
             total_net_paid_yuan: quote.amounts.total_net_paid_yuan,
             total_net_paid_cents: totalNetPaidCents.toString(),
-            formula: 'floor(P * R / T)'
+            formula: 'sum(max(0, p_i - u_i))',
+            version: 2,
+            sorting: 'r desc, g desc, created_at asc',
+            r_definition: 'r = (g - p) / g (g>0 else 0)'
           }
         },
         {
           i: 3,
           name: 'quote.due',
           detail: {
-            due_raw_cents: dueRawCents.toString(),
-            due_clamped_cents: dueClampedCents.toString(),
             due_yuan: quote.refund.due_yuan,
             due_cents: quote.refund.due_cents,
             plan: {
@@ -452,7 +447,7 @@ export const UserRefundPage = () => {
                 总实付金额 P（Stripe 优先）：Stripe {quote.amounts.stripe_net_paid_yuan} + 易支付 {quote.amounts.yipay_net_paid_yuan} =
                 {quote.amounts.total_net_paid_yuan}
               </div>
-              <div className="muted">应退 = floor(P * R / T)，其中 T = 总额度（余额+已用，包含促销）</div>
+              <div className="muted">应退 = Σ max(0, p_i - u_i)，u_i 由已用额度 U 按 (r, g, 创建时间) 分配</div>
               <div className="muted">易支付历史退款：{quote.amounts.yipay_refunded_yuan}</div>
               <Divider />
               <div>
